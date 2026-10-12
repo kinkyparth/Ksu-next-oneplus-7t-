@@ -1,4 +1,4 @@
-name: KernelSU Next Kernel Build
+name: KernelSU Next v3.2.0 Kernel Build
 
 on:
   workflow_dispatch:
@@ -29,22 +29,37 @@ jobs:
             rsync clang lld llvm gcc-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu
 
-      - name: Integrate KernelSU Next
+      - name: Integrate KernelSU Next v3.2.0
         working-directory: kernel
+        shell: bash
         run: |
-          curl -fLSs \
-            https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
-            -o /tmp/ksu-setup.sh
+          set -e
 
-          bash /tmp/ksu-setup.sh legacy
+          git clone \
+            --depth 1 \
+            --branch v3.2.0 \
+            https://github.com/KernelSU-Next/KernelSU-Next.git \
+            KernelSU-Next
 
-          echo "=== Verify KernelSU Next source ==="
+          bash KernelSU-Next/kernel/setup.sh legacy
+
+          echo "=== Verify KernelSU Next version ==="
+          git -C KernelSU-Next describe --tags --always
+
+          KSU_TAG="$(git -C KernelSU-Next describe --tags --exact-match)"
+          if [ "$KSU_TAG" != "v3.2.0" ]; then
+            echo "ERROR: Expected v3.2.0, got $KSU_TAG"
+            exit 1
+          fi
+
           test -d drivers/kernelsu
-          ls drivers/kernelsu | head -n 30
 
       - name: Configure kernel
         working-directory: kernel
+        shell: bash
         run: |
+          set -e
+
           make ARCH=arm64 CC=clang LLVM=1 \
             vendor/sm8150-perf_defconfig
 
@@ -52,7 +67,8 @@ jobs:
           scripts/config --enable KPROBES
           scripts/config --enable KPROBE_EVENTS
           scripts/config --enable KSU
-          scripts/config --enable KSU_MANUAL_HOOK
+          scripts/config --disable KSU_MANUAL_HOOK
+          scripts/config --enable KSU_KPROBES_HOOK
 
           make ARCH=arm64 CC=clang LLVM=1 olddefconfig
 
@@ -64,10 +80,10 @@ jobs:
             'CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK)=' \
             .config || true
 
-          echo "=== KernelSU hook checks ==="
+          echo "=== KernelSU hook options ==="
           grep -n -E \
-            'No hooks were defined|MANUAL_HOOK|KPROBES_HOOK' \
-            drivers/kernelsu/Kbuild || true
+            'KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_KPROBES' \
+            drivers/kernelsu/Kconfig drivers/kernelsu/Kbuild || true
 
       - name: Compile kernel Image only
         working-directory: kernel
@@ -88,24 +104,24 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          echo "=== KernelSU and compiler error context ==="
+          echo "=== KernelSU and compiler errors ==="
 
           if [ -f kernel-build.log ]; then
             grep -n -i -B 8 -A 12 -E \
-              'drivers/kernelsu/.*(error:|fatal error:)|No hooks were defined|fatal error:|error:|undefined reference|No such file|Error [0-9]+|make(\[[0-9]+\])?: \*\*\*' \
+              'No hooks were defined|fatal error:|error:|undefined reference|No such file|Error [0-9]+|make(\[[0-9]+\])?: \*\*\*' \
               kernel-build.log | tail -n 180 || true
 
             echo "=== Final 80 lines ==="
             tail -n 80 kernel-build.log
           else
-            echo "Build log not found."
+            echo "No kernel build log was generated."
           fi
 
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-build-log
+          name: kernel-build-log-v3.2.0
           path: kernel-build.log
           if-no-files-found: warn
           retention-days: 7
@@ -114,8 +130,10 @@ jobs:
         if: success()
         working-directory: kernel
         run: |
-          echo "=== Kernel Image ==="
+          set -e
           test -s arch/arm64/boot/Image
+
+          echo "=== Kernel Image ==="
           ls -lh arch/arm64/boot/Image
           sha256sum arch/arm64/boot/Image
 
@@ -123,7 +141,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: hotdogb-kernelsu-image-test
+          name: hotdogb-kernelsu-v3.2.0-image-test
           path: kernel/arch/arm64/boot/Image
           if-no-files-found: error
           retention-days: 7
