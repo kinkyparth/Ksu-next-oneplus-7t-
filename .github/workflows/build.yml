@@ -37,11 +37,23 @@ jobs:
           bash /tmp/ksu-setup.sh legacy
           test -d drivers/kernelsu
 
-      - name: Configure and verify hooks
+      - name: Configure and inspect hook definition
         working-directory: kernel
         run: |
+          echo "=== Kernel version ==="
+          head -n 6 Makefile
+
+          echo "=== Hook definition ==="
+          sed -n '45,75p' drivers/kernelsu/Kconfig
+
+          echo "=== Hook dependencies ==="
+          grep -n -A 8 -B 3 'KSU_KPROBES_HOOK' \
+            drivers/kernelsu/Kconfig || true
+
+          echo "=== Load default configuration ==="
           make ARCH=arm64 vendor/sm8150-perf_defconfig
 
+          echo "=== Enable options ==="
           scripts/config --enable MODULES
           scripts/config --enable KPROBES
           scripts/config --enable KPROBE_EVENTS
@@ -50,16 +62,14 @@ jobs:
 
           make ARCH=arm64 olddefconfig
 
-          echo "=== Kernel version ==="
-          head -n 6 Makefile
-
-          echo "=== KernelSU hook definitions ==="
-          sed -n '35,75p' drivers/kernelsu/Kconfig
-
           echo "=== Final configuration ==="
           grep -E \
             'CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU|KSU_KPROBES_HOOK)=' \
             .config || true
+
+          echo "=== Hook symbol in source and config ==="
+          grep -n 'KSU_KPROBES_HOOK' \
+            .config drivers/kernelsu/Kconfig || true
 
           echo "=== Source commit ==="
           git rev-parse HEAD
