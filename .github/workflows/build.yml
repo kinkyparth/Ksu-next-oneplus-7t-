@@ -52,16 +52,22 @@ jobs:
           scripts/config --enable KPROBES
           scripts/config --enable KPROBE_EVENTS
           scripts/config --enable KSU
+          scripts/config --enable KSU_MANUAL_HOOK
 
           make ARCH=arm64 CC=clang LLVM=1 olddefconfig
 
           echo "=== Kernel version ==="
           make ARCH=arm64 CC=clang LLVM=1 kernelversion
 
-          echo "=== Relevant configuration ==="
+          echo "=== KernelSU hook configuration ==="
           grep -E \
-            'CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU)=' \
+            'CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK)=' \
             .config || true
+
+          echo "=== KernelSU hook checks ==="
+          grep -n -E \
+            'No hooks were defined|MANUAL_HOOK|KPROBES_HOOK' \
+            drivers/kernelsu/Kbuild || true
 
       - name: Compile kernel Image only
         working-directory: kernel
@@ -86,7 +92,7 @@ jobs:
 
           if [ -f kernel-build.log ]; then
             grep -n -i -B 8 -A 12 -E \
-              'drivers/kernelsu/.*(error:|fatal error:)|fatal error:|error:|undefined reference|No such file|Error [0-9]+|make(\[[0-9]+\])?: \*\*\*' \
+              'drivers/kernelsu/.*(error:|fatal error:)|No hooks were defined|fatal error:|error:|undefined reference|No such file|Error [0-9]+|make(\[[0-9]+\])?: \*\*\*' \
               kernel-build.log | tail -n 180 || true
 
             echo "=== Final 80 lines ==="
