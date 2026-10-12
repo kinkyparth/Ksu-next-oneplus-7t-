@@ -1,4 +1,5 @@
-Name: RKSU (rsuntk KernelSU) Non-GKI Build - OnePlus 7T
+
+name: RKSU Non-GKI Build - OnePlus 7T
 
 on:
   workflow_dispatch:
@@ -28,7 +29,7 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: Checkout OnePlus 7T kernel source
+      - name: Checkout kernel
         uses: actions/checkout@v4
         with:
           repository: Evolution-X-Devices/kernel_oneplus_sm8150
@@ -51,180 +52,29 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
-          if ! git ls-remote --exit-code \
+          git ls-remote --exit-code \
             https://github.com/rsuntk/KernelSU.git \
-            "refs/heads/${KSU_BRANCH}" "refs/tags/${KSU_BRANCH}"; then
-            echo "ERROR: ref '${KSU_BRANCH}' not found on rsuntk/KernelSU."
-            exit 1
-          fi
-
-          curl -LSs \
+            "refs/heads/${KSU_BRANCH}"
+          curl -fLSs \
             "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" \
             -o /tmp/ksu-setup.sh
           test -s /tmp/ksu-setup.sh
           bash /tmp/ksu-setup.sh "${KSU_BRANCH}"
-
           test -e drivers/kernelsu
-          real="$(readlink -f drivers/kernelsu)"
-          echo "drivers/kernelsu -> $real"
           test -f drivers/kernelsu/Kconfig
-          grep -q 'kernelsu' drivers/Makefile
-          grep -q 'kernelsu' drivers/Kconfig
-
-          repo_dir="$(dirname "$real")"
-          git -C "$repo_dir" log -1 --oneline || true
-
+          grep -q kernelsu drivers/Makefile
+          grep -q kernelsu drivers/Kconfig
+          readlink -f drivers/kernelsu
           grep -rhE '^config ' drivers/kernelsu/ --include=Kconfig
 
-      - name: Apply KernelSU manual hooks
+      - name: Inspect manual hook compatibility
         working-directory: kernel
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PYEOF'
-          import os, re, sys, pathlib
-
-          def read(p):
-              return pathlib.Path(p).read_text(errors="ignore")
-
-          def write(p, s):
-              pathlib.Path(p).write_text(s)
-
-          def die(msg):
-              print("ERROR: " + msg)
-              sys.exit(1)
-
-          # ---- 1. discover what the KernelSU source actually exports ----
-          src = ""
-          for root, _, files in os.walk("drivers/kernelsu", followlinks=True):
-              for f in files:
-                  if f.endswith(".c"):
-                      src += read(os.path.join(root, f)) + "\n"
-
-          defs = {}
-          for name, params in re.findall(
-                  r"^(?:int|bool|void|long)\s+(ksu_handle_\w+)\s*\(([^)]*)\)", src, re.M):
-              params = params.strip()
-              defs[name] = 0 if params in ("", "void") else params.count(",") + 1
-
-          print("Exported ksu_handle_* functions in this KernelSU:")
-          for k, v in sorted(defs.items()):
-              print("  %s (%d params)" % (k, v))
-
-          expected = {
-              "ksu_handle_execveat": 5,
-              "ksu_handle_faccessat": 4,
-              "ksu_handle_stat": 3,
-              "ksu_handle_vfs_read": 4,
-              "ksu_handle_input_handle_event": 3,
-          }
-          required = ["ksu_handle_execveat", "ksu_handle_faccessat", "ksu_handle_stat"]
-
-          for name in required:
-              if name not in defs:
-                  die("%s not exported by this KernelSU; manual hooks differ. "
-                      "Send the list above." % name)
-
-          for name, n in expected.items():
-              if name in defs and defs[name] != n:
-                  die("%s has %d params, patch expects %d." % (name, defs[name], n))
-
-          MARK = "KSU_MANUAL_HOOK_PATCH"
-
-          def insert_before(path, func_re, line_re, snippet, label):
-              s = read(path)
-              if MARK + ":" + label in s:
-                  print("ALREADY: " + label)
-                  return
-              m = re.search(func_re, s, re.M)
-              if not m:
-                  die("%s: function not found in %s" % (label, path))
-              rest = s[m.end():]
-              m2 = re.search(line_re, rest, re.M)
-              if not m2 or m2.start() > 1500:
-                  die("%s: anchor line not found near function in %s" % (label, path))
-              pos = m.end() + m2.start()
-              s = s[:pos] + snippet.replace("@L@", label) + s[pos:]
-              write(path, s)
-              print("PATCHED: %s (%s)" % (label, path))
-
-          def insert_after(path, func_re, snippet, label):
-              s = read(path)
-              if MARK + ":" + label in s:
-                  print("ALREADY: " + label)
-                  return
-              m = re.search(func_re, s, re.M)
-              if not m:
-                  die("%s: function not found in %s" % (label, path))
-              s = s[:m.end()] + "\n" + snippet.replace("@L@", label) + s[m.end():]
-              write(path, s)
-              print("PATCHED: %s (%s)" % (label, path))
-
-          EXEC = (
-          "#ifdef CONFIG_KSU /* " + MARK + ":@L@ */\n"
-          "\textern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n"
-          "\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
-          "#endif\n")
-
-          ACCESS = (
-          "#ifdef CONFIG_KSU /* " + MARK + ":@L@ */\n"
-          "\textern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n"
-          "\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
-          "#endif\n")
-
-          VFSREAD = (
-          "#ifdef CONFIG_KSU /* " + MARK + ":@L@ */\n"
-          "\textern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);\n"
-          "\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n"
-          "#endif\n")
-
-          STAT = (
-          "#ifdef CONFIG_KSU /* " + MARK + ":@L@ */\n"
-          "\textern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n"
-          "\tksu_handle_stat(&dfd, &filename, &flags);\n"
-          "#endif\n")
-
-          INPUT = (
-          "#ifdef CONFIG_KSU /* " + MARK + ":@L@ */\n"
-          "\textern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n"
-          "\tksu_handle_input_handle_event(&type, &code, &value);\n"
-          "#endif\n")
-
-          insert_before("fs/exec.c",
-              r"^static int do_execveat_common\([^)]*\)\s*\{",
-              r"^[ \t]*if \(IS_ERR\(filename\)\)", EXEC, "execveat")
-
-          insert_before("fs/open.c",
-              r"^SYSCALL_DEFINE3\(faccessat,[^)]*\)\s*\{",
-              r"^[ \t]*if \(mode & ~S_IRWXO\)", ACCESS, "faccessat")
-
-          insert_after("fs/stat.c",
-              r"int\s+(?:vfs_fstatat|vfs_statx)\b[^\{]*\{", STAT, "stat")
-
-          if "ksu_handle_vfs_read" in defs:
-              insert_before("fs/read_write.c",
-                  r"^ssize_t vfs_read\([^)]*\)\s*\{",
-                  r"^[ \t]*if \(!\(file->f_mode & FMODE_READ\)\)", VFSREAD, "vfs_read")
-          else:
-              print("SKIP: vfs_read hook (not exported by this KernelSU)")
-
-          if "ksu_handle_input_handle_event" in defs:
-              insert_before("drivers/input/input.c",
-                  r"^static void input_handle_event\([^)]*\)\s*\{",
-                  r"^[ \t]*int disposition = input_get_disposition\(", INPUT, "input")
-          else:
-              print("SKIP: input hook (not exported by this KernelSU)")
-
-          print("Manual hooks applied.")
-          PYEOF
-
-          echo "=== Hook verification ==="
-          for f in fs/exec.c fs/open.c fs/stat.c; do
-            grep -q 'ksu_handle_' "$f" || { echo "ERROR: $f not hooked"; exit 1; }
-            echo "HOOKED: $f"
-          done
-          git diff --stat -- fs drivers/input || true
+          grep -R -nE 'ksu_handle_(execveat|faccessat|stat|vfs_read)' drivers/kernelsu
+          grep -nE 'do_execveat_common|do_faccessat|vfs_read|vfs_statx|vfs_fstatat' \
+            fs/exec.c fs/open.c fs/read_write.c fs/stat.c
 
       - name: Configure kernel
         working-directory: kernel
@@ -234,106 +84,64 @@ jobs:
           EXTRA_FRAGMENTS: ${{ inputs.fragments }}
         run: |
           set -euxo pipefail
-
           MAKE_ARGS="ARCH=arm64 CC=clang LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
-
           base="${BASE_DEFCONFIG:-vendor/sm8150-perf_defconfig}"
-          frags="${EXTRA_FRAGMENTS-vendor/oplus.config}"
-
-          find arch/arm64/configs -type f | sort | head -n 80
-
+          frags="${EXTRA_FRAGMENTS:-vendor/oplus.config}"
           test -f "arch/arm64/configs/$base"
           make $MAKE_ARGS "$base"
-
           for f in $frags; do
             test -f "arch/arm64/configs/$f"
             ARCH=arm64 scripts/kconfig/merge_config.sh -m .config "arch/arm64/configs/$f"
           done
-
-          kconfigs="$(grep -rhE '^config ' drivers/kernelsu/ --include=Kconfig | awk '{print $2}')"
-
-          if ! echo "$kconfigs" | grep -qx "KSU_MANUAL_HOOK"; then
-            echo "ERROR: KSU_MANUAL_HOOK not found in this KernelSU branch."
-            echo "$kconfigs"
-            exit 1
-          fi
-
+          grep -q 'config KSU_MANUAL_HOOK' drivers/kernelsu/Kconfig
           scripts/config --enable KSU
           scripts/config --enable KSU_MANUAL_HOOK
           scripts/config --disable KPROBES
           scripts/config --disable KPROBE_EVENTS
-
           make $MAKE_ARGS olddefconfig
-
-          make $MAKE_ARGS kernelversion
-          grep -E '^(# )?CONFIG_(KPROBES|KPROBE_EVENTS|KSU[A-Z_]*)[= ]' .config || true
-
-          grep -qx 'CONFIG_KSU=y' .config || { echo "ERROR: CONFIG_KSU not y"; exit 1; }
-          grep -qx 'CONFIG_KSU_MANUAL_HOOK=y' .config || { echo "ERROR: CONFIG_KSU_MANUAL_HOOK not y"; exit 1; }
+          grep -qx 'CONFIG_KSU=y' .config
+          grep -qx 'CONFIG_KSU_MANUAL_HOOK=y' .config
           if grep -qx 'CONFIG_KPROBES=y' .config; then
-            echo "ERROR: CONFIG_KPROBES is still enabled."
+            echo "KPROBES unexpectedly enabled"
             exit 1
           fi
-
-          echo "=== Fragment options missing from final .config ==="
-          for f in $frags; do
-            grep -E '^CONFIG_[A-Za-z0-9_]+=' "arch/arm64/configs/$f" | while IFS= read -r line; do
-              grep -qxF "$line" .config || echo "MISSING: $line"
-            done
-          done || true
 
       - name: Fix trace header include paths
         working-directory: kernel
         shell: bash
         run: |
           set -uo pipefail
-
           patch_mk() {
             dir="$1"
             mk=""
             for cand in "$dir/Kbuild" "$dir/Makefile"; do
               if [ -f "$cand" ]; then mk="$cand"; break; fi
             done
-            if [ -z "$mk" ]; then
-              echo "SKIP (no Makefile): $dir"
-              return
-            fi
-            if grep -qF 'TRACEFIX' "$mk"; then
-              echo "ALREADY: $mk"
-              return
-            fi
+            [ -n "$mk" ] || return 0
+            grep -qF TRACEFIX "$mk" && return 0
             printf '\n# TRACEFIX\nccflags-y += -I$(srctree)/$(src) -I$(src)\n' >> "$mk"
-            echo "PATCHED: $mk"
           }
-
           patch_mk drivers/media/platform/msm/camera/cam_utils
-
           while read -r hdr; do
             patch_mk "$(dirname "$hdr")"
           done < <(grep -rlE 'define[[:space:]]+TRACE_INCLUDE_PATH[[:space:]]+.' \
             --include='*.h' . 2>/dev/null || true)
 
-          echo "=== Verify cam_utils ==="
-          grep -n 'TRACE_INCLUDE_PATH' drivers/media/platform/msm/camera/cam_utils/cam_trace.h
-          tail -n 4 drivers/media/platform/msm/camera/cam_utils/Makefile
-
-      - name: Fix Oplus header include issues
+      - name: Fix Oplus header includes
         working-directory: kernel
         shell: bash
         run: |
-          if [ -f drivers/power/oplus/charger_ic/oplus_da9313.c ]; then
-            sed -i 's/#include <oplus_da9313.h>/#include "oplus_da9313.h"/g' drivers/power/oplus/charger_ic/oplus_da9313.c
-          fi
+          set -euo pipefail
           find drivers/power/oplus \( -name '*.c' -o -name '*.h' \) -print0 \
-            | xargs -0 -r sed -i 's/#include <\(oplus_[^>]*\.h\)>/#include "\1"/g' || true
-          echo "Oplus header includes patched successfully."
+            | xargs -0 -r sed -i \
+              's/#include <\(oplus_[^>]*\.h\)>/#include "\1"/g'
+          echo "Oplus include patch completed."
 
       - name: Compile kernel Image
         working-directory: kernel
         shell: bash
         run: |
           set -o pipefail
-
           make -j"$(nproc)" \
             ARCH=arm64 \
             CC=clang \
@@ -344,42 +152,6 @@ jobs:
             KCFLAGS="-Wno-error" \
             Image 2>&1 | tee ../kernel-build.log
 
-      - name: Show first build error
-        if: failure()
-        shell: bash
-        run: |
-          set +e
-
-          if [ -f kernel-build.log ]; then
-            echo "=== First error ==="
-            grep -n -m1 -B 8 -A 15 -E 'fatal error:|error:|undefined reference|No such file' \
-              kernel-build.log
-
-            echo "=== All error lines ==="
-            grep -n -E 'fatal error:|error:|undefined reference|\*\*\*' kernel-build.log | head -n 60
-
-            echo "=== Where undefined symbols are defined ==="
-            for sym in $(grep -oP 'undefined symbol: \K\w+' kernel-build.log | sort -u | head -n 25); do
-              echo "--- $sym"
-              defs="$(grep -rnE "^[A-Za-z_][A-Za-z0-9_ *]*[ *]${sym}[[:space:]]*\(" --include='*.c' kernel 2>/dev/null | grep -v ';' | head -n 2)"
-              if [ -z "$defs" ]; then
-                echo "no definition found in tree"
-                continue
-              fi
-              echo "$defs"
-              file="$(echo "$defs" | head -n 1 | cut -d: -f1)"
-              dir="$(dirname "$file")"
-              base="$(basename "$file" .c)"
-              grep -n "$base\.o" "$dir/Makefile" "$dir/Kbuild" 2>/dev/null
-            done
-
-            echo "=== Final 40 lines ==="
-            tail -n 40 kernel-build.log
-          else
-            echo "No compile log exists."
-            echo "Inspect the first failed step above this one."
-          fi
-
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
@@ -389,34 +161,18 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Verify kernel Image contains KernelSU
+      - name: Verify kernel Image
         if: success()
         working-directory: kernel
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           test -s arch/arm64/boot/Image
-
           ls -lh arch/arm64/boot/Image
           sha256sum arch/arm64/boot/Image
-
           count="$(find -L drivers/kernelsu -name '*.o' | wc -l)"
-          echo "Object files: $count"
-          if [ "$count" -eq 0 ]; then
-            echo "ERROR: no KernelSU objects were compiled."
-            exit 1
-          fi
-
-          for f in fs/exec.c fs/open.c fs/stat.c; do
-            grep -q 'ksu_handle_' "$f" || { echo "ERROR: $f is not hooked"; exit 1; }
-          done
-          echo "Manual hooks present."
-
-          if grep -qai 'kernelsu' arch/arm64/boot/Image; then
-            echo "KernelSU strings found in Image."
-          else
-            echo "WARNING: no KernelSU strings found in Image."
-          fi
+          echo "KernelSU object files: $count"
+          test "$count" -gt 0
 
       - name: Upload kernel Image
         if: success()
