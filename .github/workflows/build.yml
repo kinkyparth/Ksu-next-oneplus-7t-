@@ -2,6 +2,15 @@ name: RKSU (rsuntk KernelSU) Non-GKI Build - OnePlus 7T
 
 on:
   workflow_dispatch:
+    inputs:
+      defconfig:
+        description: "Base defconfig under arch/arm64/configs"
+        required: false
+        default: "vendor/sm8150-perf_defconfig"
+      fragments:
+        description: "Extra config fragments (space separated)"
+        required: false
+        default: "vendor/oplus.config"
 
 permissions:
   contents: read
@@ -89,12 +98,26 @@ jobs:
       - name: Configure kernel
         working-directory: kernel
         shell: bash
+        env:
+          BASE_DEFCONFIG: ${{ inputs.defconfig }}
+          EXTRA_FRAGMENTS: ${{ inputs.fragments }}
         run: |
           set -euxo pipefail
 
           MAKE_ARGS="ARCH=arm64 CC=clang LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
 
-          make $MAKE_ARGS vendor/sm8150-perf_defconfig
+          base="${BASE_DEFCONFIG:-vendor/sm8150-perf_defconfig}"
+          frags="${EXTRA_FRAGMENTS-vendor/oplus.config}"
+
+          find arch/arm64/configs -type f | sort | head -n 80
+
+          test -f "arch/arm64/configs/$base"
+          make $MAKE_ARGS "$base"
+
+          for f in $frags; do
+            test -f "arch/arm64/configs/$f"
+            ARCH=arm64 scripts/kconfig/merge_config.sh -m .config "arch/arm64/configs/$f"
+          done
 
           kconfigs="$(grep -rhE '^config ' drivers/kernelsu/ --include=Kconfig | awk '{print $2}')"
 
@@ -120,6 +143,42 @@ jobs:
             echo "ERROR: CONFIG_KPROBES is still enabled."
             exit 1
           fi
+
+          echo "=== Fragment options missing from final .config ==="
+          for f in $frags; do
+            grep -E '^CONFIG_[A-Za-z0-9_]+=' "arch/arm64/configs/$f" | while IFS= read -r line; do
+              grep -qxF "$line" .config || echo "MISSING: $line"
+            done
+          done || true
+
+      - name: Preflight undefined symbol check
+        working-directory: kernel
+        shell: bash
+        run: |
+          set +e
+
+          for sym in get_boot_mode get_project is_project get_PCB_Version register_device_proc \
+                     push_component_info smblib_read qpnp_is_power_off_charging pmicwd_init \
+                     switch_headset_state opticalfp_irq_handler_register sys_reset_dev; do
+            def="$(grep -rnE "^[A-Za-z_][A-Za-z0-9_ \*]*[ \*]${sym}[[:space:]]*\(" \
+                   --include='*.c' drivers kernel techpack sound 2>/dev/null | grep -v ';' | head -n 1)"
+            if [ -z "$def" ]; then
+              echo "$sym | NO DEFINITION IN TREE"
+              continue
+            fi
+            file="${def%%:*}"
+            dir="$(dirname "$file")"
+            base="$(basename "$file" .c)"
+            line="$(grep -hE "(^|[^A-Za-z0-9_])${base}\.o" "$dir/Makefile" "$dir/Kbuild" 2>/dev/null | head -n 1)"
+            cfg="$(echo "$line" | grep -oE 'CONFIG_[A-Za-z0-9_]+' | head -n 1)"
+            if [ -n "$cfg" ]; then
+              st="$(grep -E "^${cfg}=" .config || echo "${cfg} NOT SET")"
+            else
+              st="no CONFIG guard on this line"
+            fi
+            echo "$sym | $file | $line | $st"
+          done
+          exit 0
 
       - name: Fix trace header include paths
         working-directory: kernel
@@ -185,6 +244,21 @@ jobs:
 
             echo "=== All error lines ==="
             grep -n -E 'fatal error:|error:|undefined reference|\*\*\*' kernel-build.log | head -n 60
+
+            echo "=== Where undefined symbols are defined ==="
+            for sym in $(grep -oP 'undefined symbol: \K\w+' kernel-build.log | sort -u | head -n 25); do
+              echo "--- $sym"
+              defs="$(grep -rnE "^[A-Za-z_][A-Za-z0-9_ \*]*[ \*]${sym}[[:space:]]*\(" --include='*.c' kernel 2>/dev/null | grep -v ';' | head -n 2)"
+              if [ -z "$defs" ]; then
+                echo "no definition found in tree"
+                continue
+              fi
+              echo "$defs"
+              file="$(echo "$defs" | head -n 1 | cut -d: -f1)"
+              dir="$(dirname "$file")"
+              base="$(basename "$file" .c)"
+              grep -n "$base\.o" "$dir/Makefile" "$dir/Kbuild" 2>/dev/null
+            done
 
             echo "=== Final 40 lines ==="
             tail -n 40 kernel-build.log
