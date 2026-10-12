@@ -1,0 +1,34 @@
+name: KernelSU Next Kernel Build
+
+on:
+workflow_dispatch:
+
+permissions:
+contents: read
+
+jobs:
+build:
+runs-on: ubuntu-22.04
+steps:
+- name: Checkout kernel source
+uses: actions/checkout@v4
+with:
+repository: Evolution-X-Devices/kernel_oneplus_sm8150
+ref: bka
+path: kernel
+
+  - name: Check source and kernel version
+    working-directory: kernel
+    run: |
+      grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION) =' Makefile
+      test -f arch/arm64/configs/vendor/sm8150-perf_defconfig
+      test -f drivers/Makefile
+      test -f drivers/Kconfig
+
+  - name: Report available build configuration
+    working-directory: kernel
+    run: |
+      echo "Kernel source checkout succeeded."
+      echo "This is a validation run, not a flashable image."
+      grep -n 'TARGET_KERNEL_NO_GCC\|TARGET_KERNEL_CONFIG\|TARGET_KERNEL_SOURCE' \
+        <(curl -fsSL https://raw.githubusercontent.com/Evolution-X-Devices/device_oneplus_sm8150-common/bka/BoardConfigCommon.mk) || true
