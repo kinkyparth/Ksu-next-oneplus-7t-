@@ -61,28 +61,58 @@ jobs:
 
       - name: Compile kernel
         working-directory: kernel
+        shell: bash
         run: |
+          set -o pipefail
+
           make -j"$(nproc)" \
             ARCH=arm64 \
             CC=clang \
             LLVM=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            Image dtbs
+            Image dtbs 2>&1 | tee ../kernel-build.log
+
+      - name: Show build errors
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== Error matches ==="
+
+          if [ -f kernel-build.log ]; then
+            grep -n -i -E \
+              'fatal error:|error:|undefined reference|No such file|Error [0-9]+|make(\[[0-9]+\])?: \*\*\*' \
+              kernel-build.log | tail -n 80 || true
+
+            echo "=== Final 100 lines ==="
+            tail -n 100 kernel-build.log
+          else
+            echo "Build log not found."
+          fi
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-build-log
+          path: kernel-build.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Verify build outputs
+        if: success()
         working-directory: kernel
         run: |
           echo "=== Kernel image ==="
           ls -lh arch/arm64/boot/Image
+          sha256sum arch/arm64/boot/Image
 
           echo "=== Device trees ==="
           find arch/arm64/boot/dts -type f \
             \( -name '*.dtb' -o -name '*.dtbo' \) \
             | head -n 30
 
-          sha256sum arch/arm64/boot/Image
-
       - name: Upload kernel artifacts
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: hotdogb-kernelsu-build-test
