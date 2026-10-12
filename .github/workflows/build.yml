@@ -140,6 +140,37 @@ jobs:
 
           echo "Configuration validation passed."
 
+      - name: Fix trace header include paths (clang)
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          # Drivers that use TRACE_INCLUDE_PATH "." need -I$(src) to find
+          # their own trace header. Add it to each affected Makefile.
+          fixed=0
+          while read -r hdr; do
+            dir="$(dirname "$hdr")"
+            mk=""
+            for cand in "$dir/Kbuild" "$dir/Makefile"; do
+              if [ -f "$cand" ]; then mk="$cand"; break; fi
+            done
+            if [ -z "$mk" ]; then
+              echo "SKIP (no Makefile): $dir"
+              continue
+            fi
+            if grep -qF 'ccflags-y += -I$(src)' "$mk"; then
+              echo "ALREADY: $mk"
+              continue
+            fi
+            printf '\nccflags-y += -I$(src)\n' >> "$mk"
+            echo "PATCHED: $mk"
+            fixed=$((fixed + 1))
+          done < <(grep -rlE '^#[[:space:]]*define[[:space:]]+TRACE_INCLUDE_PATH[[:space:]]+\.[[:space:]]*$' \
+                     --include='*.h' . 2>/dev/null || true)
+
+          echo "Patched Makefiles: $fixed"
+
       - name: Compile kernel Image
         working-directory: kernel
         shell: bash
@@ -148,7 +179,7 @@ jobs:
 
           echo "=== Building arm64 kernel Image ==="
 
-          make -j"$(nproc)" \
+          make -k -j"$(nproc)" \
             ARCH=arm64 \
             CC=clang \
             LLVM=1 \
