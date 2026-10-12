@@ -1,4 +1,4 @@
-name: KernelSU Next Hook Diagnostics
+name: KernelSU Next Kernel Build
 
 on:
   workflow_dispatch:
@@ -7,8 +7,9 @@ permissions:
   contents: read
 
 jobs:
-  diagnose:
+  build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
 
     steps:
       - name: Checkout kernel source
@@ -19,12 +20,14 @@ jobs:
           path: kernel
           fetch-depth: 0
 
-      - name: Install dependencies
+      - name: Install build tools
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            bc bison build-essential flex git \
-            libelf-dev libssl-dev python3 python-is-python3
+            bc bison build-essential cpio flex git \
+            libelf-dev libssl-dev python3 python-is-python3 \
+            rsync clang lld llvm gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu
 
       - name: Integrate KernelSU Next
         working-directory: kernel
@@ -32,38 +35,60 @@ jobs:
           curl -fLSs \
             https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
             -o /tmp/ksu-setup.sh
+
           bash /tmp/ksu-setup.sh legacy
           test -d drivers/kernelsu
 
-      - name: Diagnose hook configuration
+      - name: Configure kernel
         working-directory: kernel
         run: |
-          echo "=== KernelSU Kconfig ==="
-          sed -n '1,100p' drivers/kernelsu/Kconfig
+          make ARCH=arm64 CC=clang LLVM=1 \
+            vendor/sm8150-perf_defconfig
 
-          echo "=== KernelSU Makefile ==="
-          cat drivers/kernelsu/Makefile
-
-          echo "=== Default configuration ==="
-          make ARCH=arm64 vendor/sm8150-perf_defconfig
-
-          echo "=== Relevant Kconfig symbols ==="
-          grep -R -n -E \
-            'KSU_KPROBES_HOOK|KSU_MANUAL_HOOK|KSU_SYSCALL_TABLE_HOOK|config KSU' \
-            drivers/kernelsu Kconfig
-
-          echo "=== Enable base options ==="
           scripts/config --enable MODULES
           scripts/config --enable KPROBES
           scripts/config --enable KPROBE_EVENTS
           scripts/config --enable KSU
 
-          make ARCH=arm64 olddefconfig
+          make ARCH=arm64 CC=clang LLVM=1 olddefconfig
 
-          echo "=== Resolved hook configuration ==="
-          grep -E 'KSU.*HOOK|HOOK.*KSU|CONFIG_KPROBES|CONFIG_KSU=' \
+          echo "=== Kernel version ==="
+          make ARCH=arm64 CC=clang LLVM=1 kernelversion
+
+          echo "=== KernelSU configuration ==="
+          grep -E 'CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU)=' \
             .config || true
 
-          echo "=== Kernel version and commit ==="
-          head -n 6 Makefile
-          git rev-parse HEAD
+      - name: Compile kernel
+        working-directory: kernel
+        run: |
+          make -j"$(nproc)" \
+            ARCH=arm64 \
+            CC=clang \
+            LLVM=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            Image dtbs
+
+      - name: Verify build outputs
+        working-directory: kernel
+        run: |
+          echo "=== Kernel image ==="
+          ls -lh arch/arm64/boot/Image
+
+          echo "=== Device trees ==="
+          find arch/arm64/boot/dts -type f \
+            \( -name '*.dtb' -o -name '*.dtbo' \) \
+            | head -n 30
+
+          sha256sum arch/arm64/boot/Image
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hotdogb-kernelsu-build-test
+          path: |
+            kernel/arch/arm64/boot/Image
+            kernel/arch/arm64/boot/dts/**/*.dtb
+            kernel/arch/arm64/boot/dts/**/*.dtbo
+          if-no-files-found: error
+          retention-days: 7
