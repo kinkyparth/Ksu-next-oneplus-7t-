@@ -84,6 +84,34 @@ jobs:
           grep -nE 'ksu_handle_(execveat|faccessat|stat|vfs_read)' \
             fs/exec.c fs/open.c fs/read_write.c fs/stat.c || true
 
+      - name: Show RKSU hook integration context
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== RKSU sucompat handlers ==="
+          sed -n '95,210p' drivers/kernelsu/feature/sucompat.c
+
+          echo "=== RKSU vfs read handler ==="
+          sed -n '400,435p' drivers/kernelsu/runtime/ksud.c
+
+          echo "=== RKSU exec function ==="
+          sed -n '1700,1775p' fs/exec.c
+
+          echo "=== RKSU vfs_read function ==="
+          sed -n '425,465p' fs/read_write.c
+
+          echo "=== stat syscall functions ==="
+          sed -n '330,385p' fs/stat.c
+          sed -n '475,525p' fs/stat.c
+          sed -n '550,590p' fs/stat.c
+          sed -n '625,665p' fs/stat.c
+
+          echo "=== open/faccessat candidates ==="
+          grep -nE 'faccessat|SYSCALL_DEFINE.*stat|SYSCALL_DEFINE.*execve' \
+            fs/open.c fs/stat.c fs/exec.c || true
+
       - name: Configure kernel
         working-directory: kernel
         shell: bash
