@@ -1,4 +1,4 @@
-name: KernelSU Next Kernel Build
+name: Build KernelSU Next for OnePlus 7T
 
 on:
   workflow_dispatch:
@@ -16,19 +16,49 @@ jobs:
           repository: Evolution-X-Devices/kernel_oneplus_sm8150
           ref: bka
           path: kernel
+          fetch-depth: 0
 
-      - name: Check source and kernel version
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential cpio flex git \
+            libelf-dev libssl-dev python3 python-is-python3 \
+            rsync unzip wget zip
+
+      - name: Integrate KernelSU Next legacy
         working-directory: kernel
         run: |
-          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION) =' Makefile
-          test -f arch/arm64/configs/vendor/sm8150-perf_defconfig
-          test -f drivers/Makefile
-          test -f drivers/Kconfig
+          curl -LSs \
+            https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
+            | bash -s legacy
+          test -d drivers/kernelsu
 
-      - name: Report build configuration
+      - name: Configure kernel
         working-directory: kernel
         run: |
-          echo "Kernel source checkout succeeded."
-          echo "Validation only; no boot image produced."
-          curl -fsSL https://raw.githubusercontent.com/Evolution-X-Devices/device_oneplus_sm8150-common/bka/BoardConfigCommon.mk |
-            grep -nE 'TARGET_KERNEL_NO_GCC|TARGET_KERNEL_CONFIG|TARGET_KERNEL_SOURCE' || true
+          make ARCH=arm64 vendor/sm8150-perf_defconfig
+          scripts/config --enable MODULES
+          scripts/config --enable KPROBES
+          scripts/config --enable KPROBE_EVENTS
+          scripts/config --enable KSU_KPROBE_HOOKS
+          scripts/config --enable KSU
+          make ARCH=arm64 olddefconfig
+          grep -E 'CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS|KSU)=' .config
+
+      - name: Build kernel
+        working-directory: kernel
+        run: |
+          make -j"$(nproc)" \
+            ARCH=arm64 \
+            CC=clang \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            Image
+
+      - name: Upload kernel Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernelsu-next-hotdogb-kernel-image
+          path: kernel/arch/arm64/boot/Image
+          if-no-files-found: error
