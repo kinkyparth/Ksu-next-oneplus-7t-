@@ -1,4 +1,5 @@
-name: KernelSU Next Non-GKI Build - OnePlus 7T
+
+name: KernelSU Next Kprobes - OnePlus 7T
 
 on:
   workflow_dispatch:
@@ -6,83 +7,56 @@ on:
 permissions:
   contents: read
 
-env:
-  ARCH: arm64
-  CROSS_COMPILE: aarch64-linux-gnu-
-  CROSS_COMPILE_ARM32: arm-linux-gnueabi-
-  CLANG_TRIPLE: aarch64-linux-gnu-
-
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 120
 
     steps:
-      - name: Checkout OnePlus 7T kernel source
+      - name: Checkout kernel
         uses: actions/checkout@v4
         with:
           repository: Evolution-X-Devices/kernel_oneplus_sm8150
           ref: 67c05b4545d98112870150d6f6dcc1a3f29fa47b
           path: kernel
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: Install build tools
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            bc bison build-essential cpio flex git \
+            bc bison build-essential cpio flex git curl \
             libelf-dev libssl-dev python3 python-is-python3 \
             rsync clang lld llvm \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
 
-      - name: Integrate KernelSU Next (manual, branch-safe)
+      - name: Integrate KernelSU Next legacy with kprobes
         working-directory: kernel
         shell: bash
         run: |
           set -euxo pipefail
 
-          # Try known branches, then fall back to the default branch
-          cloned=0
-          for br in dev legacy next; do
-            if git clone --branch "$br" \
-                https://github.com/KernelSU-Next/KernelSU-Next.git \
-                KernelSU-Next; then
-              echo "Cloned branch: $br"
-              cloned=1
-              break
-            fi
-            rm -rf KernelSU-Next
-          done
+          curl -fLSs \
+            https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
+            -o /tmp/ksu-setup.sh
 
-          if [ "$cloned" -ne 1 ]; then
-            git clone https://github.com/KernelSU-Next/KernelSU-Next.git \
-              KernelSU-Next
+          bash /tmp/ksu-setup.sh legacy
+
+          test -e drivers/kernelsu
+          test -f drivers/kernelsu/Kconfig
+          grep -q 'kernelsu' drivers/Makefile
+          grep -q 'kernelsu' drivers/Kconfig
+
+          echo "=== KernelSU source revision ==="
+          if [ -d KernelSU-Next/.git ]; then
+            git -C KernelSU-Next log -1 --oneline
           fi
 
-          echo "=== KernelSU Next revision ==="
-          git -C KernelSU-Next branch -a
-          git -C KernelSU-Next log -1 --oneline
-
-          test -d KernelSU-Next/kernel
-
-          # Manual integration (what setup.sh does)
-          ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
-
-          grep -q 'kernelsu' drivers/Makefile || \
-            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-
-          grep -q 'kernelsu' drivers/Kconfig || \
-            sed -i '$i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
-
-          echo "=== Verify integration ==="
-          test -f drivers/kernelsu/Kconfig
-          tail -n 3 drivers/Makefile
-          tail -n 3 drivers/Kconfig
-          find drivers/kernelsu/ -maxdepth 1 -type f | head -n 50
-
-          echo "=== Available KernelSU Kconfig options ==="
-          grep -rhE '^config ' drivers/kernelsu/ --include=Kconfig || true
+          echo "=== Verify expected kprobe option ==="
+          grep -Rnw drivers/kernelsu \
+            --include='Kconfig' \
+            -e 'KSU_KPROBE_HOOKS'
 
       - name: Configure kernel
         working-directory: kernel
@@ -98,78 +72,30 @@ jobs:
           scripts/config --enable KPROBES
           scripts/config --enable KPROBE_EVENTS
           scripts/config --enable KSU
-
-          # Enable hook options only if they exist in this KernelSU branch
-          kconfigs="$(grep -rhE '^config ' drivers/kernelsu/ --include=Kconfig | awk '{print $2}')"
-
-          for opt in KSU_KPROBES_HOOK KSU_KPROBE_HOOKS; do
-            if echo "$kconfigs" | grep -qx "$opt"; then
-              echo "Enabling $opt"
-              scripts/config --enable "$opt"
-            fi
-          done
-
-          if echo "$kconfigs" | grep -qx "KSU_MANUAL_HOOK"; then
-            echo "Disabling KSU_MANUAL_HOOK"
-            scripts/config --disable KSU_MANUAL_HOOK
-          fi
+          scripts/config --enable KSU_KPROBE_HOOKS
 
           make $MAKE_ARGS olddefconfig
 
-          echo "=== Kernel version ==="
-          make $MAKE_ARGS kernelversion
-
-          echo "=== KSU / kprobe configuration ==="
-          grep -E '^CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU[A-Z_]*)=' .config || true
-
-          echo "=== Validate configuration ==="
-          for option in CONFIG_KPROBES CONFIG_KSU; do
+          echo "=== Validate final config ==="
+          for option in \
+            CONFIG_MODULES \
+            CONFIG_KPROBES \
+            CONFIG_KPROBE_EVENTS \
+            CONFIG_KSU \
+            CONFIG_KSU_KPROBE_HOOKS; do
             if ! grep -qx "${option}=y" .config; then
-              echo "ERROR: ${option} is not enabled after olddefconfig."
+              echo "ERROR: $option is not enabled after olddefconfig"
               exit 1
             fi
           done
 
-          echo "Configuration validation passed."
+          grep -E '^CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU|KSU_KPROBE_HOOKS)=' .config
 
-      - name: Diagnose syscall compatibility
-        working-directory: kernel
-        shell: bash
-        run: |
-          set +e
-
-          echo "=== KernelSU syscall type references ==="
-          grep -Rnw \
-            --include='*.h' \
-            --include='*.c' \
-            -e 'syscall_fn_t' \
-            -e 'ksu_syscall_fn_t' \
-            arch/arm64 include kernel drivers/kernelsu/ \
-            2>/dev/null | head -n 150
-
-          echo "=== Syscall hook files ==="
-          find drivers/kernelsu/ -type f \
-            \( -name '*syscall*' -o -name '*hook*' \) \
-            -print 2>/dev/null | head -n 100
-
-          echo "=== Kernel syscall table references ==="
-          grep -Rnw \
-            --include='*.h' \
-            --include='*.c' \
-            -e 'sys_call_table' \
-            -e 'syscall_table' \
-            arch/arm64 include kernel \
-            2>/dev/null | head -n 100
-
-          exit 0
-
-      - name: Compile kernel Image
+      - name: Build kernel Image
         working-directory: kernel
         shell: bash
         run: |
           set -o pipefail
-
-          echo "=== Building arm64 kernel Image ==="
 
           make -j"$(nproc)" \
             ARCH=arm64 \
@@ -178,34 +104,18 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             CLANG_TRIPLE=aarch64-linux-gnu- \
-            KCFLAGS="-Wno-error" \
             Image 2>&1 | tee ../kernel-build.log
 
-      - name: Show build errors
+      - name: Show errors
         if: failure()
         shell: bash
         run: |
-          set +e
-
-          echo "=== Workspace ==="
-          pwd
-          ls -lah
-
           if [ -f kernel-build.log ]; then
-            echo "=== Relevant build errors ==="
-            grep -n -i -B 8 -A 12 -E \
-              'No hooks were defined|fatal error:|error:|undefined reference|No such file|Error [0-9]+|make(\[[0-9]+\])?: \*\*\*' \
-              kernel-build.log | tail -n 200
-
-            echo "=== Final 100 lines ==="
+            grep -n -i -B 10 -A 15 -E \
+              'error:|fatal error:|No hooks were defined|undefined reference|No such file|Error [0-9]+|make(\[[0-9]+\])?: \*\*\*' \
+              kernel-build.log | tail -n 250 || true
             tail -n 100 kernel-build.log
-          else
-            echo "No compile log exists."
-            echo "The failure occurred before compilation."
-            echo "Inspect the first failed step above this one."
           fi
-
-          exit 0
 
       - name: Upload build log
         if: always()
@@ -216,15 +126,12 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Verify kernel Image
+      - name: Verify Image
         if: success()
         working-directory: kernel
-        shell: bash
         run: |
-          set -e
+          set -eux
           test -s arch/arm64/boot/Image
-
-          echo "=== Kernel Image ==="
           ls -lh arch/arm64/boot/Image
           sha256sum arch/arm64/boot/Image
 
@@ -232,7 +139,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: hotdogb-kernelsu-image-test
+          name: hotdogb-kernelsu-image
           path: kernel/arch/arm64/boot/Image
           if-no-files-found: error
           retention-days: 7
