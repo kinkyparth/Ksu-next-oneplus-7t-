@@ -37,7 +37,10 @@ jobs:
             -o /tmp/ksu-setup.sh
 
           bash /tmp/ksu-setup.sh legacy
+
+          echo "=== Verify KernelSU Next source ==="
           test -d drivers/kernelsu
+          ls drivers/kernelsu | head -n 30
 
       - name: Configure kernel
         working-directory: kernel
@@ -55,36 +58,39 @@ jobs:
           echo "=== Kernel version ==="
           make ARCH=arm64 CC=clang LLVM=1 kernelversion
 
-          echo "=== KernelSU configuration ==="
-          grep -E 'CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU)=' \
+          echo "=== Relevant configuration ==="
+          grep -E \
+            'CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU)=' \
             .config || true
 
-      - name: Compile kernel
+      - name: Compile kernel Image only
         working-directory: kernel
         shell: bash
         run: |
           set -o pipefail
+
+          echo "=== Building arm64 kernel Image ==="
 
           make -j"$(nproc)" \
             ARCH=arm64 \
             CC=clang \
             LLVM=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            Image dtbs 2>&1 | tee ../kernel-build.log
+            Image 2>&1 | tee ../kernel-build.log
 
       - name: Show build errors
         if: failure()
         shell: bash
         run: |
-          echo "=== Error matches ==="
+          echo "=== KernelSU and compiler error context ==="
 
           if [ -f kernel-build.log ]; then
-            grep -n -i -E \
-              'fatal error:|error:|undefined reference|No such file|Error [0-9]+|make(\[[0-9]+\])?: \*\*\*' \
-              kernel-build.log | tail -n 80 || true
+            grep -n -i -B 8 -A 12 -E \
+              'drivers/kernelsu/.*(error:|fatal error:)|fatal error:|error:|undefined reference|No such file|Error [0-9]+|make(\[[0-9]+\])?: \*\*\*' \
+              kernel-build.log | tail -n 180 || true
 
-            echo "=== Final 100 lines ==="
-            tail -n 100 kernel-build.log
+            echo "=== Final 80 lines ==="
+            tail -n 80 kernel-build.log
           else
             echo "Build log not found."
           fi
@@ -98,27 +104,20 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Verify build outputs
+      - name: Verify kernel Image
         if: success()
         working-directory: kernel
         run: |
-          echo "=== Kernel image ==="
+          echo "=== Kernel Image ==="
+          test -s arch/arm64/boot/Image
           ls -lh arch/arm64/boot/Image
           sha256sum arch/arm64/boot/Image
 
-          echo "=== Device trees ==="
-          find arch/arm64/boot/dts -type f \
-            \( -name '*.dtb' -o -name '*.dtbo' \) \
-            | head -n 30
-
-      - name: Upload kernel artifacts
+      - name: Upload kernel Image
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: hotdogb-kernelsu-build-test
-          path: |
-            kernel/arch/arm64/boot/Image
-            kernel/arch/arm64/boot/dts/**/*.dtb
-            kernel/arch/arm64/boot/dts/**/*.dtbo
+          name: hotdogb-kernelsu-image-test
+          path: kernel/arch/arm64/boot/Image
           if-no-files-found: error
           retention-days: 7
