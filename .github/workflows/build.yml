@@ -1,4 +1,4 @@
-name: KernelSU Next Compile Test
+name: KernelSU Next Integration Test
 
 on:
   workflow_dispatch:
@@ -7,26 +7,41 @@ permissions:
   contents: read
 
 jobs:
-  inspect:
+  integrate:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout kernel source
+      - name: Checkout matching kernel source
         uses: actions/checkout@v4
         with:
           repository: Evolution-X-Devices/kernel_oneplus_sm8150
-          ref: lineage-23.0
+          ref: 67c05b4545d98112870150d6f6dcc1a3f29fa47b
           path: kernel
           fetch-depth: 0
 
-      - name: Check source and config
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential \
+            cpio flex git libelf-dev libssl-dev python3 \
+            python-is-python3 rsync wget
+
+      - name: Integrate KernelSU Next legacy
         working-directory: kernel
         run: |
-          echo "Commit:"
-          git rev-parse HEAD
-          echo "Kernel version:"
-          head -n 6 Makefile
-          echo "Required config:"
-          grep -E 'CONFIG_(EROFS_FS|KPROBES|KPROBE_EVENTS|MODULES)=' \
-            arch/arm64/configs/vendor/sm8150-perf_defconfig || true
-          echo "Build configuration:"
-          cat build.config.aarch64
+          curl -LSs \
+            https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
+            -o /tmp/ksu-setup.sh
+          bash /tmp/ksu-setup.sh legacy
+          test -d drivers/kernelsu
+
+      - name: Configure and verify
+        working-directory: kernel
+        run: |
+          make ARCH=arm64 vendor/sm8150-perf_defconfig
+          scripts/config --enable MODULES
+          scripts/config --enable KPROBES
+          scripts/config --enable KPROBE_EVENTS
+          scripts/config --enable KSU_KPROBE_HOOKS
+          scripts/config --enable KSU
+          make ARCH=arm64 olddefconfig
+          grep -E 'CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS|KSU)=' .config
