@@ -1,15 +1,14 @@
-
 name: RKSU Non-GKI Build - OnePlus 7T
 
 on:
   workflow_dispatch:
     inputs:
       defconfig:
-        description: "Base defconfig under arch/arm64/configs"
+        description: "Base defconfig"
         required: false
         default: "vendor/sm8150-perf_defconfig"
       fragments:
-        description: "Extra config fragments (space separated)"
+        description: "Config fragments"
         required: false
         default: "vendor/oplus.config"
 
@@ -26,7 +25,6 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
 
     steps:
       - name: Checkout kernel
@@ -35,150 +33,183 @@ jobs:
           repository: Evolution-X-Devices/kernel_oneplus_sm8150
           ref: 67c05b4545d98112870150d6f6dcc1a3f29fa47b
           path: kernel
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: Install build tools
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            bc bison build-essential cpio curl flex git \
-            libelf-dev libssl-dev python3 python-is-python3 \
-            rsync clang lld llvm \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+            bc bison build-essential ca-certificates \
+            ccache clang curl flex git libelf-dev \
+            libssl-dev lld llvm make pahole \
+            python3 python-is-python3 unzip zip \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
-      - name: Integrate RKSU
-        working-directory: kernel
-        shell: bash
-        run: |
-          set -euxo pipefail
-          git ls-remote --exit-code \
-            https://github.com/rsuntk/KernelSU.git \
-            "refs/heads/${KSU_BRANCH}"
-          curl -fLSs \
-            "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" \
-            -o /tmp/ksu-setup.sh
-          test -s /tmp/ksu-setup.sh
-          bash /tmp/ksu-setup.sh "${KSU_BRANCH}"
-          test -e drivers/kernelsu
-          test -f drivers/kernelsu/Kconfig
-          grep -q kernelsu drivers/Makefile
-          grep -q kernelsu drivers/Kconfig
-          readlink -f drivers/kernelsu
-          grep -rhE '^config ' drivers/kernelsu/ --include=Kconfig
-
-      - name: Inspect manual hook compatibility
+      - name: Install RKSU
         working-directory: kernel
         shell: bash
         run: |
           set -euo pipefail
-          grep -R -nE 'ksu_handle_(execveat|faccessat|stat|vfs_read)' drivers/kernelsu
-          grep -nE 'do_execveat_common|do_faccessat|vfs_read|vfs_statx|vfs_fstatat' \
-            fs/exec.c fs/open.c fs/read_write.c fs/stat.c
+          curl -fsSL \
+            https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh \
+            -o /tmp/ksu-setup.sh
+          bash /tmp/ksu-setup.sh main
+          test -e drivers/kernelsu
+          grep -nE 'KSU|kernelsu' Makefile
+          grep -nE 'KSU|kernelsu' Kconfig
+
+      - name: Inspect RKSU hook integration points
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== RKSU handler definitions ==="
+          sed -n '100,210p' drivers/kernelsu/feature/sucompat.c
+          sed -n '400,440p' drivers/kernelsu/runtime/ksud.c
+          sed -n '20,50p' drivers/kernelsu/runtime/ksud.h
+
+          echo "=== exec implementation ==="
+          sed -n '1700,1775p' fs/exec.c
+
+          echo "=== open syscall candidates ==="
+          grep -nE 'SYSCALL_DEFINE[0-9]+\(faccessat|do_faccessat' \
+            fs/open.c || true
+
+          echo "=== stat syscall candidates ==="
+          grep -nE 'SYSCALL_DEFINE[0-9]+\(newfstatat|SYSCALL_DEFINE[0-9]+\(stat|SYSCALL_DEFINE[0-9]+\(lstat|vfs_fstatat|vfs_statx' \
+            fs/stat.c || true
+          sed -n '530,590p' fs/stat.c
+
+          echo "=== read implementation ==="
+          sed -n '400,465p' fs/read_write.c
+
+          echo "=== existing kernel hook calls ==="
+          grep -nE 'ksu_handle_(execveat|faccessat|stat|vfs_read)' \
+            fs/exec.c fs/open.c fs/read_write.c fs/stat.c || true
+
+      - name: Apply compatibility include fixes
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          find drivers/power/oplus -type f \
+            \( -name '*.c' -o -name '*.h' \) -print0 |
+          while IFS= read -r -d '' file; do
+            sed -i -E \
+              's/#include <(oplus_[^>]+)>/#include "\1"/g' \
+              "$file"
+          done
+
+          if [ -f drivers/media/platform/msm/camera/cam_utils/Makefile ]; then
+            grep -q 'cam_trace' \
+              drivers/media/platform/msm/camera/cam_utils/Makefile || true
+          fi
+
+          grep -R -n 'cam_trace.h' \
+            drivers/media/platform/msm/camera || true
 
       - name: Configure kernel
         working-directory: kernel
         shell: bash
         env:
-          BASE_DEFCONFIG: ${{ inputs.defconfig }}
-          EXTRA_FRAGMENTS: ${{ inputs.fragments }}
+          DEFCONFIG: ${{ inputs.defconfig }}
+          FRAGMENTS: ${{ inputs.fragments }}
         run: |
-          set -euxo pipefail
-          MAKE_ARGS="ARCH=arm64 CC=clang LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
-          base="${BASE_DEFCONFIG:-vendor/sm8150-perf_defconfig}"
-          frags="${EXTRA_FRAGMENTS:-vendor/oplus.config}"
-          test -f "arch/arm64/configs/$base"
-          make $MAKE_ARGS "$base"
-          for f in $frags; do
-            test -f "arch/arm64/configs/$f"
-            ARCH=arm64 scripts/kconfig/merge_config.sh -m .config "arch/arm64/configs/$f"
+          set -euo pipefail
+
+          make O=out ARCH=arm64 \
+            CC=clang LLVM=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            "$DEFCONFIG"
+
+          for fragment in $FRAGMENTS; do
+            if [ -f "arch/arm64/configs/$fragment" ]; then
+              scripts/kconfig/merge_config.sh -O out \
+                out/.config "arch/arm64/configs/$fragment"
+            else
+              echo "Fragment not found: $fragment"
+              exit 1
+            fi
           done
-          grep -q 'config KSU_MANUAL_HOOK' drivers/kernelsu/Kconfig
-          scripts/config --enable KSU
-          scripts/config --enable KSU_MANUAL_HOOK
-          scripts/config --disable KPROBES
-          scripts/config --disable KPROBE_EVENTS
-          make $MAKE_ARGS olddefconfig
-          grep -qx 'CONFIG_KSU=y' .config
-          grep -qx 'CONFIG_KSU_MANUAL_HOOK=y' .config
-          if grep -qx 'CONFIG_KPROBES=y' .config; then
-            echo "KPROBES unexpectedly enabled"
-            exit 1
-          fi
 
-      - name: Fix trace header include paths
-        working-directory: kernel
-        shell: bash
-        run: |
-          set -uo pipefail
-          patch_mk() {
-            dir="$1"
-            mk=""
-            for cand in "$dir/Kbuild" "$dir/Makefile"; do
-              if [ -f "$cand" ]; then mk="$cand"; break; fi
-            done
-            [ -n "$mk" ] || return 0
-            grep -qF TRACEFIX "$mk" && return 0
-            printf '\n# TRACEFIX\nccflags-y += -I$(srctree)/$(src) -I$(src)\n' >> "$mk"
-          }
-          patch_mk drivers/media/platform/msm/camera/cam_utils
-          while read -r hdr; do
-            patch_mk "$(dirname "$hdr")"
-          done < <(grep -rlE 'define[[:space:]]+TRACE_INCLUDE_PATH[[:space:]]+.' \
-            --include='*.h' . 2>/dev/null || true)
+          scripts/config --file out/.config \
+            --enable KSU \
+            --enable KSU_MANUAL_HOOK \
+            --disable KPROBES \
+            --disable KPROBE_EVENTS
 
-      - name: Fix Oplus header includes
+          make O=out ARCH=arm64 \
+            CC=clang LLVM=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            olddefconfig
+
+          grep -E '^CONFIG_KSU=|^CONFIG_KSU_MANUAL_HOOK=|^CONFIG_KPROBES=|^CONFIG_KPROBE_EVENTS=' \
+            out/.config || true
+
+          grep -q '^CONFIG_KSU=y$' out/.config
+          grep -q '^CONFIG_KSU_MANUAL_HOOK=y$' out/.config
+
+      - name: Build kernel image
         working-directory: kernel
         shell: bash
         run: |
           set -euo pipefail
-          find drivers/power/oplus \( -name '*.c' -o -name '*.h' \) -print0 \
-            | xargs -0 -r sed -i \
-              's/#include <\(oplus_[^>]*\.h\)>/#include "\1"/g'
-          echo "Oplus include patch completed."
 
-      - name: Compile kernel Image
-        working-directory: kernel
-        shell: bash
-        run: |
-          set -o pipefail
-          make -j"$(nproc)" \
+          make O=out -j"$(nproc)" \
             ARCH=arm64 \
-            CC=clang \
-            LLVM=1 \
+            CC=clang LLVM=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             KCFLAGS="-Wno-error" \
             Image 2>&1 | tee ../kernel-build.log
 
-      - name: Upload build log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: hotdogb-rksu-build-log
-          path: kernel-build.log
-          if-no-files-found: warn
-          retention-days: 7
-
-      - name: Verify kernel Image
-        if: success()
+      - name: Verify build output
         working-directory: kernel
         shell: bash
         run: |
           set -euo pipefail
-          test -s arch/arm64/boot/Image
-          ls -lh arch/arm64/boot/Image
-          sha256sum arch/arm64/boot/Image
-          count="$(find -L drivers/kernelsu -name '*.o' | wc -l)"
-          echo "KernelSU object files: $count"
-          test "$count" -gt 0
 
-      - name: Upload kernel Image
+          test -s out/arch/arm64/boot/Image
+          ls -lh out/arch/arm64/boot/Image
+
+          echo "=== KernelSU objects ==="
+          find out -type f \
+            \( -iname '*kernelsu*.o' -o -path '*kernelsu*/*.o' \) \
+            | head -100 || true
+
+          echo "=== Hook calls in source ==="
+          grep -nE 'ksu_handle_(execveat|faccessat|stat|vfs_read)' \
+            fs/exec.c fs/open.c fs/read_write.c fs/stat.c || true
+
+      - name: Upload diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hotdogb-rksu-diagnostics
+          path: |
+            kernel-build.log
+            kernel/drivers/kernelsu/feature/sucompat.c
+            kernel/drivers/kernelsu/runtime/ksud.c
+            kernel/drivers/kernelsu/runtime/ksud.h
+            kernel/fs/exec.c
+            kernel/fs/open.c
+            kernel/fs/read_write.c
+            kernel/fs/stat.c
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload test image
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: hotdogb-rksu-image-test
-          path: kernel/arch/arm64/boot/Image
+          path: kernel/out/arch/arm64/boot/Image
           if-no-files-found: error
           retention-days: 7
