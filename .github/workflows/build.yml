@@ -66,51 +66,133 @@ jobs:
           readlink -f drivers/kernelsu
           grep -rhE '^config ' drivers/kernelsu/ --include=Kconfig
 
-      - name: Inspect manual hook compatibility
+      - name: Apply RKSU manual hooks
         working-directory: kernel
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "=== RKSU handler definitions ==="
-          grep -R -nE 'ksu_handle_(execveat|faccessat|stat|vfs_read)' \
-            drivers/kernelsu || true
+          python3 <<'PY'
+          from pathlib import Path
 
-          echo "=== Kernel hook candidates ==="
-          grep -nE 'do_execveat_common|do_faccessat|vfs_read|vfs_statx|vfs_fstatat' \
-            fs/exec.c fs/open.c fs/read_write.c fs/stat.c || true
+          def replace_once(file, old, new):
+              p = Path(file)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(
+                      f"PATCH ABORTED: {file}: expected one anchor, found {count}"
+                  )
+              p.write_text(text.replace(old, new, 1))
 
-          echo "=== Existing RKSU calls in kernel source ==="
-          grep -nE 'ksu_handle_(execveat|faccessat|stat|vfs_read)' \
-            fs/exec.c fs/open.c fs/read_write.c fs/stat.c || true
+          replace_once(
+              "fs/exec.c",
+              "static int do_execveat_common(int fd, struct filename *filename,",
+              """#ifdef CONFIG_KSU
+          extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
+                                         void *argv, void *envp, int *flags);
+          #endif
 
-      - name: Show RKSU hook integration context
-        working-directory: kernel
-        shell: bash
-        run: |
-          set -euo pipefail
+          static int do_execveat_common(int fd, struct filename *filename,"""
+          )
 
-          echo "=== RKSU sucompat handlers ==="
-          sed -n '95,210p' drivers/kernelsu/feature/sucompat.c
+          replace_once(
+              "fs/exec.c",
+              "\\tif (IS_ERR(filename))\\n\\t\\treturn PTR_ERR(filename);",
+              """\\tif (IS_ERR(filename))
+          \\t\\treturn PTR_ERR(filename);
+          #ifdef CONFIG_KSU
+          \\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+          #endif"""
+          )
 
-          echo "=== RKSU vfs read handler ==="
-          sed -n '400,435p' drivers/kernelsu/runtime/ksud.c
+          replace_once(
+              "fs/read_write.c",
+              "ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)",
+              """#ifdef CONFIG_KSU
+          extern bool ksu_vfs_read_hook __read_mostly;
+          extern int ksu_handle_vfs_read(struct file **file_ptr,
+                                         char __user **buf_ptr,
+                                         size_t *count_ptr, loff_t **pos);
+          #endif
 
-          echo "=== RKSU exec function ==="
-          sed -n '1700,1775p' fs/exec.c
+          ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)"""
+          )
 
-          echo "=== RKSU vfs_read function ==="
-          sed -n '425,465p' fs/read_write.c
+          replace_once(
+              "fs/read_write.c",
+              """{
+          \\tssize_t ret;
 
-          echo "=== stat syscall functions ==="
-          sed -n '330,385p' fs/stat.c
-          sed -n '475,525p' fs/stat.c
-          sed -n '550,590p' fs/stat.c
-          sed -n '625,665p' fs/stat.c
+          \\tif (!(file->f_mode & FMODE_READ))""",
+              """{
+          \\tssize_t ret;
 
-          echo "=== open/faccessat candidates ==="
-          grep -nE 'faccessat|SYSCALL_DEFINE.*stat|SYSCALL_DEFINE.*execve' \
-            fs/open.c fs/stat.c fs/exec.c || true
+          #ifdef CONFIG_KSU
+          \\tif (unlikely(ksu_vfs_read_hook))
+          \\t\\tksu_handle_vfs_read(&file, &buf, &count, &pos);
+          #endif
+
+          \\tif (!(file->f_mode & FMODE_READ))"""
+          )
+
+          replace_once(
+              "fs/stat.c",
+              "int vfs_statx(int dfd, const char __user *filename, int flags,",
+              """#ifdef CONFIG_KSU
+          extern int ksu_handle_stat(int *dfd,
+                                     const char __user **filename_user,
+                                     int *flags);
+          #endif
+
+          int vfs_statx(int dfd, const char __user *filename, int flags,"""
+          )
+
+          replace_once(
+              "fs/stat.c",
+              """\\tunsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;
+
+          \\tif ((flags & ~(AT_SYMLINK_NOFOLLOW""",
+              """\\tunsigned int lookup_flags = LOOKUP_FOLLOW | LOOKUP_AUTOMOUNT;
+
+          #ifdef CONFIG_KSU
+          \\tksu_handle_stat(&dfd, &filename, &flags);
+          #endif
+          \\tif ((flags & ~(AT_SYMLINK_NOFOLLOW"""
+          )
+
+          replace_once(
+              "fs/open.c",
+              "SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)",
+              """#ifdef CONFIG_KSU
+          extern int ksu_handle_faccessat(int *dfd,
+                                          const char __user **filename_user,
+                                          int *mode, int *flags);
+          #endif
+
+          SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)"""
+          )
+
+          replace_once(
+              "fs/open.c",
+              """SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+          {
+          \\tconst struct cred *old_cred;""",
+              """SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+          {
+          \\tconst struct cred *old_cred;
+          #ifdef CONFIG_KSU
+          \\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+          #endif"""
+          )
+
+          print("RKSU hook patch applied.")
+          PY
+
+          grep -n 'ksu_handle_execveat(&fd' fs/exec.c
+          grep -n 'ksu_handle_vfs_read(&file' fs/read_write.c
+          grep -n 'ksu_handle_stat(&dfd' fs/stat.c
+          grep -n 'ksu_handle_faccessat(&dfd' fs/open.c
 
       - name: Configure kernel
         working-directory: kernel
