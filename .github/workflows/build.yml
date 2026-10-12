@@ -21,14 +21,15 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential \
-            cpio flex git libelf-dev libssl-dev python3 \
-            python-is-python3 rsync wget
+          sudo apt-get install -y \
+            bc bison build-essential cpio flex git \
+            libelf-dev libssl-dev python3 python-is-python3 \
+            rsync wget
 
       - name: Integrate KernelSU Next legacy
         working-directory: kernel
         run: |
-          curl -LSs \
+          curl -fLSs \
             https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
             -o /tmp/ksu-setup.sh
           bash /tmp/ksu-setup.sh legacy
@@ -38,10 +39,23 @@ jobs:
         working-directory: kernel
         run: |
           make ARCH=arm64 vendor/sm8150-perf_defconfig
+
           scripts/config --enable MODULES
           scripts/config --enable KPROBES
           scripts/config --enable KPROBE_EVENTS
-          scripts/config --enable KSU_KPROBE_HOOKS
           scripts/config --enable KSU
+
           make ARCH=arm64 olddefconfig
-          grep -E 'CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS|KSU)=' .config
+
+          echo "=== Kernel version ==="
+          head -n 6 Makefile
+
+          echo "=== Required configuration ==="
+          grep -E 'CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU)=' .config
+
+          echo "=== KernelSU hook options ==="
+          grep -E 'KSU.*KPROBE|KPROBE.*KSU' .config || true
+
+          echo "=== KernelSU source ==="
+          test -d drivers/kernelsu
+          git rev-parse HEAD
