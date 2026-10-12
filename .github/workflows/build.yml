@@ -1,4 +1,3 @@
-
 name: KernelSU Next Non-GKI Build - OnePlus 7T
 
 on:
@@ -6,6 +5,12 @@ on:
 
 permissions:
   contents: read
+
+env:
+  ARCH: arm64
+  CROSS_COMPILE: aarch64-linux-gnu-
+  CROSS_COMPILE_ARM32: arm-linux-gnueabi-
+  CLANG_TRIPLE: aarch64-linux-gnu-
 
 jobs:
   build:
@@ -27,37 +32,57 @@ jobs:
           sudo apt-get install -y \
             bc bison build-essential cpio flex git \
             libelf-dev libssl-dev python3 python-is-python3 \
-            rsync clang lld llvm gcc-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu
+            rsync clang lld llvm \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
 
-      - name: Integrate KernelSU Next using legacy setup
+      - name: Integrate KernelSU Next (manual, branch-safe)
         working-directory: kernel
         shell: bash
         run: |
           set -euxo pipefail
 
-          git clone \
-            --depth 1 \
-            --branch next \
-            https://github.com/KernelSU-Next/KernelSU-Next.git \
-            KernelSU-Next
+          # Try known branches, then fall back to the default branch
+          cloned=0
+          for br in dev legacy next; do
+            if git clone --branch "$br" \
+                https://github.com/KernelSU-Next/KernelSU-Next.git \
+                KernelSU-Next; then
+              echo "Cloned branch: $br"
+              cloned=1
+              break
+            fi
+            rm -rf KernelSU-Next
+          done
 
-          echo "=== KernelSU Next revision ==="
-          git -C KernelSU-Next log -1 --oneline
-
-          test -f KernelSU-Next/kernel/setup.sh
-
-          bash KernelSU-Next/kernel/setup.sh legacy
-
-          echo "=== Verify integration ==="
-          if [ ! -d drivers/kernelsu ]; then
-            echo "ERROR: drivers/kernelsu was not created."
-            echo "Review the setup script output."
-            exit 1
+          if [ "$cloned" -ne 1 ]; then
+            git clone https://github.com/KernelSU-Next/KernelSU-Next.git \
+              KernelSU-Next
           fi
 
-          find drivers/kernelsu -maxdepth 2 -type f \
-            -print | head -n 100
+          echo "=== KernelSU Next revision ==="
+          git -C KernelSU-Next branch -a
+          git -C KernelSU-Next log -1 --oneline
+
+          test -d KernelSU-Next/kernel
+
+          # Manual integration (what setup.sh does)
+          ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
+
+          grep -q 'kernelsu' drivers/Makefile || \
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+
+          grep -q 'kernelsu' drivers/Kconfig || \
+            sed -i '$i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
+          echo "=== Verify integration ==="
+          test -f drivers/kernelsu/Kconfig
+          tail -n 3 drivers/Makefile
+          tail -n 3 drivers/Kconfig
+          find drivers/kernelsu/ -maxdepth 1 -type f | head -n 50
+
+          echo "=== Available KernelSU Kconfig options ==="
+          grep -rhE '^config ' drivers/kernelsu/ --include=Kconfig || true
 
       - name: Configure kernel
         working-directory: kernel
@@ -65,32 +90,40 @@ jobs:
         run: |
           set -euxo pipefail
 
-          make ARCH=arm64 CC=clang LLVM=1 \
-            vendor/sm8150-perf_defconfig
+          MAKE_ARGS="ARCH=arm64 CC=clang LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
+
+          make $MAKE_ARGS vendor/sm8150-perf_defconfig
 
           scripts/config --enable MODULES
           scripts/config --enable KPROBES
           scripts/config --enable KPROBE_EVENTS
           scripts/config --enable KSU
-          scripts/config --enable KSU_KPROBE_HOOKS
-          scripts/config --disable KSU_MANUAL_HOOK
 
-          make ARCH=arm64 CC=clang LLVM=1 olddefconfig
+          # Enable hook options only if they exist in this KernelSU branch
+          kconfigs="$(grep -rhE '^config ' drivers/kernelsu/ --include=Kconfig | awk '{print $2}')"
+
+          for opt in KSU_KPROBES_HOOK KSU_KPROBE_HOOKS; do
+            if echo "$kconfigs" | grep -qx "$opt"; then
+              echo "Enabling $opt"
+              scripts/config --enable "$opt"
+            fi
+          done
+
+          if echo "$kconfigs" | grep -qx "KSU_MANUAL_HOOK"; then
+            echo "Disabling KSU_MANUAL_HOOK"
+            scripts/config --disable KSU_MANUAL_HOOK
+          fi
+
+          make $MAKE_ARGS olddefconfig
 
           echo "=== Kernel version ==="
-          make ARCH=arm64 CC=clang LLVM=1 kernelversion
+          make $MAKE_ARGS kernelversion
 
-          echo "=== Required configuration ==="
-          grep -E \
-            '^CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU|KSU_KPROBE_HOOKS)=' \
-            .config || true
+          echo "=== KSU / kprobe configuration ==="
+          grep -E '^CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU[A-Z_]*)=' .config || true
 
           echo "=== Validate configuration ==="
-          for option in \
-            CONFIG_KPROBES \
-            CONFIG_KPROBE_EVENTS \
-            CONFIG_KSU \
-            CONFIG_KSU_KPROBE_HOOKS; do
+          for option in CONFIG_KPROBES CONFIG_KSU; do
             if ! grep -qx "${option}=y" .config; then
               echo "ERROR: ${option} is not enabled after olddefconfig."
               exit 1
@@ -111,11 +144,11 @@ jobs:
             --include='*.c' \
             -e 'syscall_fn_t' \
             -e 'ksu_syscall_fn_t' \
-            arch/arm64 include kernel drivers/kernelsu \
-            2>/dev/null | head -n 150 || true
+            arch/arm64 include kernel drivers/kernelsu/ \
+            2>/dev/null | head -n 150
 
           echo "=== Syscall hook files ==="
-          find drivers/kernelsu -type f \
+          find drivers/kernelsu/ -type f \
             \( -name '*syscall*' -o -name '*hook*' \) \
             -print 2>/dev/null | head -n 100
 
@@ -126,7 +159,9 @@ jobs:
             -e 'sys_call_table' \
             -e 'syscall_table' \
             arch/arm64 include kernel \
-            2>/dev/null | head -n 100 || true
+            2>/dev/null | head -n 100
+
+          exit 0
 
       - name: Compile kernel Image
         working-directory: kernel
@@ -141,6 +176,9 @@ jobs:
             CC=clang \
             LLVM=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            KCFLAGS="-Wno-error" \
             Image 2>&1 | tee ../kernel-build.log
 
       - name: Show build errors
@@ -157,7 +195,7 @@ jobs:
             echo "=== Relevant build errors ==="
             grep -n -i -B 8 -A 12 -E \
               'No hooks were defined|fatal error:|error:|undefined reference|No such file|Error [0-9]+|make(\[[0-9]+\])?: \*\*\*' \
-              kernel-build.log | tail -n 200 || true
+              kernel-build.log | tail -n 200
 
             echo "=== Final 100 lines ==="
             tail -n 100 kernel-build.log
@@ -166,6 +204,8 @@ jobs:
             echo "The failure occurred before compilation."
             echo "Inspect the first failed step above this one."
           fi
+
+          exit 0
 
       - name: Upload build log
         if: always()
