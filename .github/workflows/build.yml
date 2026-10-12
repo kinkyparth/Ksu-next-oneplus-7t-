@@ -1,4 +1,5 @@
-name: KernelSU Next v3.2.0 Kernel Build
+
+name: KernelSU Next v3.2.0 Legacy Kernel Build
 
 on:
   workflow_dispatch:
@@ -12,7 +13,7 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: Checkout kernel source
+      - name: Checkout OnePlus 7T kernel source
         uses: actions/checkout@v4
         with:
           repository: Evolution-X-Devices/kernel_oneplus_sm8150
@@ -29,36 +30,59 @@ jobs:
             rsync clang lld llvm gcc-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu
 
-      - name: Integrate KernelSU Next v3.2.0
+      - name: Integrate KernelSU Next v3.2.0 Legacy
         working-directory: kernel
         shell: bash
         run: |
-          set -e
+          set -euxo pipefail
 
           git clone \
             --depth 1 \
-            --branch v3.2.0 \
+            --branch v3.2.0-legacy \
             https://github.com/KernelSU-Next/KernelSU-Next.git \
             KernelSU-Next
 
-          bash KernelSU-Next/kernel/setup.sh legacy
-
-          echo "=== Verify KernelSU Next version ==="
+          echo "=== KernelSU Next version ==="
           git -C KernelSU-Next describe --tags --always
 
           KSU_TAG="$(git -C KernelSU-Next describe --tags --exact-match)"
-          if [ "$KSU_TAG" != "v3.2.0" ]; then
-            echo "ERROR: Expected v3.2.0, got $KSU_TAG"
-            exit 1
-          fi
+          test "$KSU_TAG" = "v3.2.0-legacy"
+
+          bash KernelSU-Next/kernel/setup.sh legacy
 
           test -d drivers/kernelsu
+          echo "=== Integration completed ==="
+
+      - name: Check syscall type compatibility
+        working-directory: kernel
+        shell: bash
+        run: |
+          echo "=== syscall_fn_t definitions ==="
+          grep -Rnw \
+            --include='*.h' \
+            --include='*.c' \
+            -e 'syscall_fn_t' \
+            -e 'ksu_syscall_fn_t' \
+            arch/arm64 include kernel drivers/kernelsu \
+            2>/dev/null | head -n 120 || true
+
+          echo "=== KernelSU syscall hook header ==="
+          sed -n '1,120p' drivers/kernelsu/hook/syscall_hook.h
+
+          echo "=== Kernel syscall table declarations ==="
+          grep -Rnw \
+            --include='*.h' \
+            --include='*.c' \
+            -e 'sys_call_table' \
+            -e 'syscall_table' \
+            arch/arm64 include kernel \
+            2>/dev/null | head -n 100 || true
 
       - name: Configure kernel
         working-directory: kernel
         shell: bash
         run: |
-          set -e
+          set -euxo pipefail
 
           make ARCH=arm64 CC=clang LLVM=1 \
             vendor/sm8150-perf_defconfig
@@ -75,17 +99,17 @@ jobs:
           echo "=== Kernel version ==="
           make ARCH=arm64 CC=clang LLVM=1 kernelversion
 
-          echo "=== KernelSU hook configuration ==="
+          echo "=== KernelSU configuration ==="
           grep -E \
             'CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK)=' \
             .config || true
 
-          echo "=== KernelSU hook options ==="
+          echo "=== Available hook options ==="
           grep -n -E \
             'KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_KPROBES' \
             drivers/kernelsu/Kconfig drivers/kernelsu/Kbuild || true
 
-      - name: Compile kernel Image only
+      - name: Compile kernel Image
         working-directory: kernel
         shell: bash
         run: |
@@ -104,15 +128,15 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          echo "=== KernelSU and compiler errors ==="
+          echo "=== Relevant build errors ==="
 
           if [ -f kernel-build.log ]; then
             grep -n -i -B 8 -A 12 -E \
               'No hooks were defined|fatal error:|error:|undefined reference|No such file|Error [0-9]+|make(\[[0-9]+\])?: \*\*\*' \
-              kernel-build.log | tail -n 180 || true
+              kernel-build.log | tail -n 200 || true
 
-            echo "=== Final 80 lines ==="
-            tail -n 80 kernel-build.log
+            echo "=== Final 100 lines ==="
+            tail -n 100 kernel-build.log
           else
             echo "No kernel build log was generated."
           fi
@@ -121,7 +145,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-build-log-v3.2.0
+          name: hotdogb-kernelsu-v3.2.0-legacy-build-log
           path: kernel-build.log
           if-no-files-found: warn
           retention-days: 7
@@ -129,6 +153,7 @@ jobs:
       - name: Verify kernel Image
         if: success()
         working-directory: kernel
+        shell: bash
         run: |
           set -e
           test -s arch/arm64/boot/Image
@@ -141,7 +166,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: hotdogb-kernelsu-v3.2.0-image-test
+          name: hotdogb-kernelsu-v3.2.0-legacy-image-test
           path: kernel/arch/arm64/boot/Image
           if-no-files-found: error
           retention-days: 7
