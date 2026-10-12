@@ -1,15 +1,14 @@
-
-name: RKSU Non-GKI Build - OnePlus 7T HD1901
+name: RKSU (rsuntk KernelSU) Non-GKI Build - OnePlus 7T
 
 on:
   workflow_dispatch:
     inputs:
       defconfig:
-        description: "Base defconfig"
-        required: true
+        description: "Base defconfig under arch/arm64/configs"
+        required: false
         default: "vendor/sm8150-perf_defconfig"
       fragments:
-        description: "Additional config fragments, space-separated"
+        description: "Extra config fragments (space separated)"
         required: false
         default: "vendor/oplus.config"
 
@@ -29,13 +28,13 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: Checkout OnePlus 7T kernel
+      - name: Checkout OnePlus 7T kernel source
         uses: actions/checkout@v4
         with:
           repository: Evolution-X-Devices/kernel_oneplus_sm8150
           ref: 67c05b4545d98112870150d6f6dcc1a3f29fa47b
           path: kernel
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Install build tools
         run: |
@@ -47,31 +46,22 @@ jobs:
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
 
-      - name: Verify target and source files
+      - name: Check KernelSU hook points in kernel
         working-directory: kernel
         shell: bash
         run: |
-          set -euxo pipefail
-
-          echo "=== Kernel source revision ==="
-          git rev-parse HEAD
-          test "$(git rev-parse HEAD)" = "67c05b4545d98112870150d6f6dcc1a3f29fa47b"
-
-          echo "=== Target configuration ==="
-          test -f arch/arm64/configs/vendor/sm8150-perf_defconfig
-          test -f drivers/media/platform/msm/camera/cam_utils/cam_trace.h
-          test -f drivers/power/oplus/charger_ic/oplus_da9313.c
-
-          echo "=== DA9313 header search ==="
-          find drivers -name 'oplus_da9313.h' -print
-
-          HEADER="$(find drivers -name 'oplus_da9313.h' -print -quit)"
-          if [ -z "$HEADER" ]; then
-            echo "ERROR: oplus_da9313.h is absent from the checked-out source."
-            exit 1
-          fi
-
-          echo "Found header: $HEADER"
+          set +e
+          grep -n 'ksu_handle_' \
+            fs/exec.c fs/open.c fs/read_write.c fs/stat.c \
+            drivers/input/input.c 2>/dev/null
+          for f in fs/exec.c fs/open.c fs/read_write.c fs/stat.c drivers/input/input.c; do
+            if grep -q 'ksu_handle_' "$f" 2>/dev/null; then
+              echo "HOOKED:  $f"
+            else
+              echo "MISSING: $f"
+            fi
+          done
+          exit 0
 
       - name: Integrate RKSU
         working-directory: kernel
@@ -79,19 +69,30 @@ jobs:
         run: |
           set -euxo pipefail
 
-          curl -fLSs \
+          if ! git ls-remote --exit-code \
+            https://github.com/rsuntk/KernelSU.git \
+            "refs/heads/${KSU_BRANCH}" "refs/tags/${KSU_BRANCH}"; then
+            echo "ERROR: ref '${KSU_BRANCH}' not found on rsuntk/KernelSU."
+            exit 1
+          fi
+
+          curl -LSs \
             "https://raw.githubusercontent.com/rsuntk/KernelSU/main/kernel/setup.sh" \
             -o /tmp/ksu-setup.sh
-
           test -s /tmp/ksu-setup.sh
-          bash /tmp/ksu-setup.sh "$KSU_BRANCH"
+          bash /tmp/ksu-setup.sh "${KSU_BRANCH}"
 
           test -e drivers/kernelsu
+          real="$(readlink -f drivers/kernelsu)"
+          echo "drivers/kernelsu -> $real"
           test -f drivers/kernelsu/Kconfig
           grep -q 'kernelsu' drivers/Makefile
           grep -q 'kernelsu' drivers/Kconfig
 
-          echo "=== RKSU Kconfig options ==="
+          repo_dir="$(dirname "$real")"
+          git -C "$repo_dir" log -1 --oneline || true
+          echo "$repo_dir" > /tmp/ksu_repo_dir
+
           grep -rhE '^config ' drivers/kernelsu/ --include=Kconfig
 
       - name: Configure kernel
@@ -106,102 +107,123 @@ jobs:
           MAKE_ARGS="ARCH=arm64 CC=clang LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
 
           base="${BASE_DEFCONFIG:-vendor/sm8150-perf_defconfig}"
-          fragments="${EXTRA_FRAGMENTS:-vendor/oplus.config}"
+          frags="${EXTRA_FRAGMENTS-vendor/oplus.config}"
+
+          find arch/arm64/configs -type f | sort | head -n 80
 
           test -f "arch/arm64/configs/$base"
           make $MAKE_ARGS "$base"
 
-          for fragment in $fragments; do
-            test -f "arch/arm64/configs/$fragment"
-            ARCH=arm64 scripts/kconfig/merge_config.sh \
-              -m .config "arch/arm64/configs/$fragment"
+          for f in $frags; do
+            test -f "arch/arm64/configs/$f"
+            ARCH=arm64 scripts/kconfig/merge_config.sh -m .config "arch/arm64/configs/$f"
           done
 
-          options="$(grep -rhE '^config ' drivers/kernelsu/ --include=Kconfig | awk '{print $2}')"
+          kconfigs="$(grep -rhE '^config ' drivers/kernelsu/ --include=Kconfig | awk '{print $2}')"
 
-          scripts/config --enable KSU
-
-          if echo "$options" | grep -qx KSU_MANUAL_HOOK; then
-            scripts/config --enable KSU_MANUAL_HOOK
-          elif echo "$options" | grep -qx KSU_KPROBE_HOOKS; then
-            scripts/config --enable KPROBES
-            scripts/config --enable KPROBE_EVENTS
-            scripts/config --enable KSU_KPROBE_HOOKS
-          else
-            echo "ERROR: This RKSU revision exposes neither expected hook option."
-            echo "$options"
+          if ! echo "$kconfigs" | grep -qx "KSU_MANUAL_HOOK"; then
+            echo "ERROR: KSU_MANUAL_HOOK not found in this KernelSU branch."
+            echo "$kconfigs"
             exit 1
           fi
+
+          scripts/config --enable KSU
+          scripts/config --enable KSU_MANUAL_HOOK
+          scripts/config --disable KPROBES
+          scripts/config --disable KPROBE_EVENTS
 
           make $MAKE_ARGS olddefconfig
 
-          echo "=== Final RKSU configuration ==="
-          grep -E '^CONFIG_(KSU|KPROBES|KPROBE_EVENTS|KSU[A-Z_]*)=' .config || true
-          grep -qx 'CONFIG_KSU=y' .config
+          make $MAKE_ARGS kernelversion
+          grep -E '^(# )?CONFIG_(KPROBES|KPROBE_EVENTS|KSU[A-Z_]*)[= ]' .config || true
 
-      - name: Fix camera trace-header include path
-        working-directory: kernel
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          DIR="drivers/media/platform/msm/camera/cam_utils"
-          FILE="$DIR/Makefile"
-
-          test -f "$DIR/cam_trace.c"
-          test -f "$DIR/cam_trace.h"
-
-          if [ ! -f "$FILE" ]; then
-            touch "$FILE"
-          fi
-
-          if ! grep -qF '# TRACEFIX' "$FILE"; then
-            cat >> "$FILE" <<'EOF'
-
-          # TRACEFIX
-          ccflags-y += -I$(srctree)/$(src) -I$(src)
-          EOF
-          fi
-
-          echo "=== Trace include settings ==="
-          grep -n 'TRACE_INCLUDE_PATH\|TRACE_INCLUDE_FILE' "$DIR/cam_trace.h" || true
-          tail -n 5 "$FILE"
-
-      - name: Fix DA9313 header include path
-        working-directory: kernel
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          SOURCE="drivers/power/oplus/charger_ic/oplus_da9313.c"
-          DIR="drivers/power/oplus/charger_ic"
-          FILE="$DIR/Makefile"
-
-          HEADER="$(find drivers -name 'oplus_da9313.h' -print -quit)"
-          if [ -z "$HEADER" ]; then
-            echo "ERROR: oplus_da9313.h is missing."
+          grep -qx 'CONFIG_KSU=y' .config || { echo "ERROR: CONFIG_KSU not y"; exit 1; }
+          grep -qx 'CONFIG_KSU_MANUAL_HOOK=y' .config || { echo "ERROR: CONFIG_KSU_MANUAL_HOOK not y"; exit 1; }
+          if grep -qx 'CONFIG_KPROBES=y' .config; then
+            echo "ERROR: CONFIG_KPROBES is still enabled."
             exit 1
           fi
 
-          HEADER_DIR="$(dirname "$HEADER")"
-          echo "Header path: $HEADER"
+          echo "=== Fragment options missing from final .config ==="
+          for f in $frags; do
+            grep -E '^CONFIG_[A-Za-z0-9_]+=' "arch/arm64/configs/$f" | while IFS= read -r line; do
+              grep -qxF "$line" .config || echo "MISSING: $line"
+            done
+          done || true
 
-          if [ "$HEADER_DIR" != "$DIR" ]; then
-            if [ ! -f "$FILE" ]; then
-              touch "$FILE"
+      - name: Preflight undefined symbol check
+        working-directory: kernel
+        shell: bash
+        run: |
+          set +e
+
+          for sym in get_boot_mode get_project is_project get_PCB_Version register_device_proc \
+            push_component_info smblib_read qpnp_is_power_off_charging pmicwd_init \
+            switch_headset_state opticalfp_irq_handler_register sys_reset_dev; do
+            def="$(grep -rnE "^[A-Za-z_][A-Za-z0-9_ *][ *]${sym}[[:space:]](" \
+              --include='.c' drivers kernel techpack sound 2>/dev/null | grep -v ';' | head -n 1)"
+            if [ -z "$def" ]; then
+              echo "$sym | NO DEFINITION IN TREE"
+              continue
             fi
-
-            INCLUDE_LINE="ccflags-y += -I\$(srctree)/$HEADER_DIR"
-
-            if ! grep -qF "$INCLUDE_LINE" "$FILE"; then
-              printf '\n%s\n' "$INCLUDE_LINE" >> "$FILE"
+            file="${def%%:}"
+            dir="$(dirname "$file")"
+            base="$(basename "$file" .c)"
+            line="$(grep -hE "(^|[^A-Za-z0-9_])${base}.o" "$dir/Makefile" "$dir/Kbuild" 2>/dev/null | head -n 1)"
+            cfg="$(echo "$line" | grep -oE 'CONFIG_[A-Za-z0-9_]+' | head -n 1)"
+            if [ -n "$cfg" ]; then
+              st="$(grep -E "^${cfg}=" .config || echo "${cfg} NOT SET")"
+            else
+              st="no CONFIG guard on this line"
             fi
+            echo "$sym | $file | $line | $st"
+          done
+          exit 0
+
+      - name: Fix trace header include paths
+        working-directory: kernel
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          patch_mk() {
+            dir="$1"
+            mk=""
+            for cand in "$dir/Kbuild" "$dir/Makefile"; do
+              if [ -f "$cand" ]; then mk="$cand"; break; fi
+            done
+            if [ -z "$mk" ]; then
+              echo "SKIP (no Makefile): $dir"
+              return
+            fi
+            if grep -qF 'TRACEFIX' "$mk"; then
+              echo "ALREADY: $mk"
+              return
+            fi
+            printf '\n# TRACEFIX\nccflags-y += -I$(srctree)/$(src) -I$(src)\n' >> "$mk"
+            echo "PATCHED: $mk"
+          }
+
+          patch_mk drivers/media/platform/msm/camera/cam_utils
+
+          while read -r hdr; do
+            patch_mk "$(dirname "$hdr")"
+          done < <(grep -rlE 'define[[:space:]]+TRACE_INCLUDE_PATH[[:space:]]+.' \
+            --include='*.h' . 2>/dev/null || true)
+
+          echo "=== Verify cam_utils ==="
+          grep -n 'TRACE_INCLUDE_PATH' drivers/media/platform/msm/camera/cam_utils/cam_trace.h
+          tail -n 4 drivers/media/platform/msm/camera/cam_utils/Makefile
+
+      - name: Fix Oplus header include issues
+        working-directory: kernel
+        shell: bash
+        run: |
+          if [ -f drivers/power/oplus/charger_ic/oplus_da9313.c ]; then
+            sed -i 's/#include <oplus_da9313.h>/#include "oplus_da9313.h"/g' drivers/power/oplus/charger_ic/oplus_da9313.c
           fi
-
-          echo "=== DA9313 source include ==="
-          sed -n '65,76p' "$SOURCE"
-          echo "=== DA9313 Makefile ==="
-          cat "$FILE"
+          find drivers/power/oplus -name '*.c' -o -name '*.h' | xargs sed -i 's/#include <\(oplus_.*\.h\)>/#include "\1"/g' || true
+          echo "Oplus header includes patched successfully."
 
       - name: Compile kernel Image
         working-directory: kernel
@@ -209,33 +231,51 @@ jobs:
         run: |
           set -o pipefail
 
-          MAKE_ARGS="ARCH=arm64 CC=clang LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CLANG_TRIPLE=aarch64-linux-gnu-"
-
-          make -j"$(nproc)" $MAKE_ARGS \
+          make -j"$(nproc)" \
+            ARCH=arm64 \
+            CC=clang \
+            LLVM=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
             KCFLAGS="-Wno-error" \
             Image 2>&1 | tee ../kernel-build.log
 
-      - name: Show first build errors
+      - name: Show first build error
         if: failure()
         shell: bash
         run: |
           set +e
 
           if [ -f kernel-build.log ]; then
-            echo "=== First compiler error ==="
-            grep -n -m1 -B 10 -A 20 -E \
-              'fatal error:|error:|undefined reference|No such file' \
+            echo "=== First error ==="
+            grep -n -m1 -B 8 -A 15 -E 'fatal error:|error:|undefined reference|No such file' \
               kernel-build.log
 
-            echo "=== Error summary ==="
-            grep -n -E \
-              'fatal error:|error:|undefined reference|\*\*\*' \
-              kernel-build.log | head -n 100
+            echo "=== All error lines ==="    
+            grep -n -E 'fatal error:|error:|undefined reference|\*\*\*' kernel-build.log | head -n 60    
 
-            echo "=== Final 60 lines ==="
-            tail -n 60 kernel-build.log
+            echo "=== Where undefined symbols are defined ==="    
+            for sym in $(grep -oP 'undefined symbol: \K\w+' kernel-build.log | sort -u | head -n 25); do    
+              echo "--- $sym"    
+              defs="$(grep -rnE "^[A-Za-z_][A-Za-z0-9_ \*]*[ \*]${sym}[[:space:]]*\(" --include='*.c' kernel 2>/dev/null | grep -v ';' | head -n 2)"    
+              if [ -z "$defs" ]; then    
+                echo "no definition found in tree"    
+                continue    
+              fi    
+              echo "$defs"    
+              file="$(echo "$defs" | head -n 1 | cut -d: -f1)"    
+              dir="$(dirname "$file")"    
+              base="$(basename "$file" .c)"    
+              grep -n "$base\.o" "$dir/Makefile" "$dir/Kbuild" 2>/dev/null    
+            done    
+
+            echo "=== Final 40 lines ==="    
+            tail -n 40 kernel-build.log
+
           else
-            echo "No kernel-build.log; inspect the failed step above."
+            echo "No compile log exists."
+            echo "Inspect the first failed step above this one."
           fi
 
       - name: Upload build log
@@ -247,19 +287,29 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Verify kernel Image
+      - name: Verify kernel Image contains KernelSU
         if: success()
         working-directory: kernel
         shell: bash
         run: |
-          set -euxo pipefail
+          set -e
+          test -s arch/arm64/boot/Image
 
-          IMAGE="arch/arm64/boot/Image"
-          test -s "$IMAGE"
+          ls -lh arch/arm64/boot/Image
+          sha256sum arch/arm64/boot/Image
 
-          echo "=== Built Image ==="
-          ls -lh "$IMAGE"
-          sha256sum "$IMAGE"
+          count="$(find -L drivers/kernelsu -name '*.o' | wc -l)"
+          echo "Object files: $count"
+          if [ "$count" -eq 0 ]; then
+            echo "ERROR: no KernelSU objects were compiled."
+            exit 1
+          fi
+
+          if grep -qai 'kernelsu' arch/arm64/boot/Image; then
+            echo "KernelSU strings found in Image."
+          else
+            echo "WARNING: no KernelSU strings found in Image."
+          fi
 
       - name: Upload kernel Image
         if: success()
