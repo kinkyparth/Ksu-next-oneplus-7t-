@@ -1,4 +1,4 @@
-name: Build KernelSU Next for OnePlus 7T
+name: KernelSU Next Compile Test
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  inspect:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout kernel source
@@ -18,47 +18,15 @@ jobs:
           path: kernel
           fetch-depth: 0
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            bc bison build-essential cpio flex git \
-            libelf-dev libssl-dev python3 python-is-python3 \
-            rsync unzip wget zip
-
-      - name: Integrate KernelSU Next legacy
+      - name: Check source and config
         working-directory: kernel
         run: |
-          curl -LSs \
-            https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
-            | bash -s legacy
-          test -d drivers/kernelsu
-
-      - name: Configure kernel
-        working-directory: kernel
-        run: |
-          make ARCH=arm64 vendor/sm8150-perf_defconfig
-          scripts/config --enable MODULES
-          scripts/config --enable KPROBES
-          scripts/config --enable KPROBE_EVENTS
-          scripts/config --enable KSU_KPROBE_HOOKS
-          scripts/config --enable KSU
-          make ARCH=arm64 olddefconfig
-          grep -E 'CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS|KSU)=' .config
-
-      - name: Build kernel
-        working-directory: kernel
-        run: |
-          make -j"$(nproc)" \
-            ARCH=arm64 \
-            CC=clang \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            Image
-
-      - name: Upload kernel Image
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernelsu-next-hotdogb-kernel-image
-          path: kernel/arch/arm64/boot/Image
-          if-no-files-found: error
+          echo "Commit:"
+          git rev-parse HEAD
+          echo "Kernel version:"
+          head -n 6 Makefile
+          echo "Required config:"
+          grep -E 'CONFIG_(EROFS_FS|KPROBES|KPROBE_EVENTS|MODULES)=' \
+            arch/arm64/configs/vendor/sm8150-perf_defconfig || true
+          echo "Build configuration:"
+          cat build.config.aarch64
