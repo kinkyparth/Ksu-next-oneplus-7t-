@@ -30,7 +30,7 @@ jobs:
             rsync clang lld llvm gcc-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu
 
-      - name: Integrate KernelSU Next v3.2.0 Legacy
+      - name: Download KernelSU Next legacy source
         working-directory: kernel
         shell: bash
         run: |
@@ -42,47 +42,81 @@ jobs:
             https://github.com/KernelSU-Next/KernelSU-Next.git \
             KernelSU-Next
 
-          echo "=== KernelSU Next version ==="
-          git -C KernelSU-Next describe --tags --always
+          echo "=== KernelSU tag ==="
+          git -C KernelSU-Next describe --tags --exact-match
 
-          KSU_TAG="$(git -C KernelSU-Next describe --tags --exact-match)"
-          test "$KSU_TAG" = "v3.2.0-legacy"
+          test "$(git -C KernelSU-Next describe --tags --exact-match)" \
+            = "v3.2.0-legacy"
 
-          bash KernelSU-Next/kernel/setup.sh legacy
+          echo "=== KernelSU setup script ==="
+          test -f KernelSU-Next/kernel/setup.sh
+          sed -n '1,220p' KernelSU-Next/kernel/setup.sh
 
-          test -d drivers/kernelsu
-          echo "=== Integration completed ==="
-
-      - name: Check syscall type compatibility
+      - name: Integrate KernelSU Next
         working-directory: kernel
         shell: bash
         run: |
-          echo "=== syscall_fn_t definitions ==="
-          grep -Rnw \
-            --include='*.h' \
-            --include='*.c' \
-            -e 'syscall_fn_t' \
-            -e 'ksu_syscall_fn_t' \
-            arch/arm64 include kernel drivers/kernelsu \
-            2>/dev/null | head -n 120 || true
+          set -euxo pipefail
 
-          echo "=== KernelSU syscall hook header ==="
-          sed -n '1,120p' drivers/kernelsu/hook/syscall_hook.h
+          bash KernelSU-Next/kernel/setup.sh legacy
 
-          echo "=== Kernel syscall table declarations ==="
+          echo "=== Integration result ==="
+          find . -maxdepth 5 \
+            \( -iname '*kernelsu*' -o -iname '*ksu*' \) \
+            -print | head -n 150
+
+          if [ ! -d drivers/kernelsu ]; then
+            echo "ERROR: drivers/kernelsu was not created."
+            echo "Inspect the setup script output and directory layout."
+            exit 1
+          fi
+
+          echo "=== KernelSU files ==="
+          find drivers/kernelsu -maxdepth 3 -type f \
+            -print | head -n 150
+
+      - name: Diagnose syscall type compatibility
+        if: always()
+        working-directory: kernel
+        shell: bash
+        run: |
+          set +e
+
+          echo "=== Kernel checkout ==="
+          pwd
+          ls -lah
+
+          echo "=== KernelSU directories ==="
+          find . -maxdepth 5 -type d \
+            \( -iname '*kernelsu*' -o -iname '*ksu*' \) \
+            -print 2>/dev/null | head -n 150
+
+          echo "=== Syscall hook files ==="
+          find . -type f \
+            \( -name 'syscall_hook.h' -o -name '*syscall*hook*' \) \
+            -print 2>/dev/null | head -n 100
+
+          echo "=== syscall_fn_t references ==="
           grep -Rnw \
-            --include='*.h' \
-            --include='*.c' \
-            -e 'sys_call_table' \
-            -e 'syscall_table' \
-            arch/arm64 include kernel \
-            2>/dev/null | head -n 100 || true
+            --include='*.h' --include='*.c' \
+            -e 'syscall_fn_t' -e 'ksu_syscall_fn_t' \
+            arch/arm64 include kernel drivers 2>/dev/null \
+            | head -n 150 || true
+
+          echo "=== Kernel syscall table references ==="
+          grep -Rnw \
+            --include='*.h' --include='*.c' \
+            -e 'sys_call_table' -e 'syscall_table' \
+            arch/arm64 include kernel 2>/dev/null \
+            | head -n 100 || true
 
       - name: Configure kernel
         working-directory: kernel
         shell: bash
         run: |
           set -euxo pipefail
+
+          test -d drivers/kernelsu
 
           make ARCH=arm64 CC=clang LLVM=1 \
             vendor/sm8150-perf_defconfig
@@ -128,18 +162,27 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          echo "=== Relevant build errors ==="
+          set +e
 
-          if [ -f kernel-build.log ]; then
-            grep -n -i -B 8 -A 12 -E \
-              'No hooks were defined|fatal error:|error:|undefined reference|No such file|Error [0-9]+|make(\[[0-9]+\])?: \*\*\*' \
-              kernel-build.log | tail -n 200 || true
+          echo "=== Workspace ==="
+          pwd
+          ls -lah
 
-            echo "=== Final 100 lines ==="
-            tail -n 100 kernel-build.log
-          else
-            echo "No kernel build log was generated."
-          fi
+          echo "=== Find logs ==="
+          find . -maxdepth 5 -type f \
+            \( -name 'kernel-build.log' -o -name '*.log' \) \
+            -print 2>/dev/null | head -n 100
+
+          for LOG in kernel-build.log kernel/kernel-build.log; do
+            if [ -f "$LOG" ]; then
+              echo "=== Relevant errors from $LOG ==="
+              grep -n -i -B 8 -A 12 -E \
+                'No hooks were defined|fatal error:|error:|undefined reference|No such file|Error [0-9]+|make(\[[0-9]+\])?: \*\*\*' \
+                "$LOG" | tail -n 200 || true
+              echo "=== Final 100 lines ==="
+              tail -n 100 "$LOG"
+            fi
+          done
 
       - name: Upload build log
         if: always()
