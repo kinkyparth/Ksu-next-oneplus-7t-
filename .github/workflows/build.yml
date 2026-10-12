@@ -1,4 +1,4 @@
-name: KernelSU Next Integration Test
+name: KernelSU Next Hook Diagnostics
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 jobs:
-  integrate:
+  diagnose:
     runs-on: ubuntu-22.04
 
     steps:
@@ -23,9 +23,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            bc bison build-essential cpio flex git \
-            libelf-dev libssl-dev python3 python-is-python3 \
-            rsync wget
+            bc bison build-essential flex git \
+            libelf-dev libssl-dev python3 python-is-python3
 
       - name: Integrate KernelSU Next
         working-directory: kernel
@@ -33,43 +32,38 @@ jobs:
           curl -fLSs \
             https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
             -o /tmp/ksu-setup.sh
-
           bash /tmp/ksu-setup.sh legacy
           test -d drivers/kernelsu
 
-      - name: Configure and inspect hook definition
+      - name: Diagnose hook configuration
         working-directory: kernel
         run: |
-          echo "=== Kernel version ==="
-          head -n 6 Makefile
+          echo "=== KernelSU Kconfig ==="
+          sed -n '1,100p' drivers/kernelsu/Kconfig
 
-          echo "=== Hook definition ==="
-          sed -n '45,75p' drivers/kernelsu/Kconfig
+          echo "=== KernelSU Makefile ==="
+          cat drivers/kernelsu/Makefile
 
-          echo "=== Hook dependencies ==="
-          grep -n -A 8 -B 3 'KSU_KPROBES_HOOK' \
-            drivers/kernelsu/Kconfig || true
-
-          echo "=== Load default configuration ==="
+          echo "=== Default configuration ==="
           make ARCH=arm64 vendor/sm8150-perf_defconfig
 
-          echo "=== Enable options ==="
+          echo "=== Relevant Kconfig symbols ==="
+          grep -R -n -E \
+            'KSU_KPROBES_HOOK|KSU_MANUAL_HOOK|KSU_SYSCALL_TABLE_HOOK|config KSU' \
+            drivers/kernelsu Kconfig
+
+          echo "=== Enable base options ==="
           scripts/config --enable MODULES
           scripts/config --enable KPROBES
           scripts/config --enable KPROBE_EVENTS
           scripts/config --enable KSU
-          scripts/config --enable KSU_KPROBES_HOOK
 
           make ARCH=arm64 olddefconfig
 
-          echo "=== Final configuration ==="
-          grep -E \
-            'CONFIG_(MODULES|KPROBES|KPROBE_EVENTS|KSU|KSU_KPROBES_HOOK)=' \
+          echo "=== Resolved hook configuration ==="
+          grep -E 'KSU.*HOOK|HOOK.*KSU|CONFIG_KPROBES|CONFIG_KSU=' \
             .config || true
 
-          echo "=== Hook symbol in source and config ==="
-          grep -n 'KSU_KPROBES_HOOK' \
-            .config drivers/kernelsu/Kconfig || true
-
-          echo "=== Source commit ==="
+          echo "=== Kernel version and commit ==="
+          head -n 6 Makefile
           git rev-parse HEAD
