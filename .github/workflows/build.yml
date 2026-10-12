@@ -1,4 +1,4 @@
-name: RKSU (rsuntk KernelSU) Non-GKI Build - OnePlus 7T
+Name: RKSU (rsuntk KernelSU) Non-GKI Build - OnePlus 7T
 
 on:
   workflow_dispatch:
@@ -200,7 +200,7 @@ jobs:
               r"^[ \t]*if \(mode & ~S_IRWXO\)", ACCESS, "faccessat")
 
           insert_after("fs/stat.c",
-              r"^int vfs_fstatat\([^)]*\)\s*\{", STAT, "stat")
+              r"int\s+(?:vfs_fstatat|vfs_statx)\b[^\{]*\{", STAT, "stat")
 
           if "ksu_handle_vfs_read" in defs:
               insert_before("fs/read_write.c",
