@@ -95,6 +95,7 @@ jobs:
         run: |
           set -e
 
+          # -idirafter = fallback only, so each driver's own Makefile -I paths still win
           roots="drivers/platform/msm drivers/media/platform/msm drivers/soc/qcom drivers/misc drivers/input drivers/char drivers/power"
 
           {
@@ -103,12 +104,12 @@ jobs:
               p=$(dirname "$d")
               if ls "$p"/*.h >/dev/null 2>&1; then echo "$PWD/$p"; fi
             done
-            # Dirs holding tracepoint headers (fixes cam_trace.h)
-            find $roots -name '*_trace.h' -printf '%h\n' 2>/dev/null | sed "s|^|$PWD/|"
+            # Camera tracepoint headers only (fixes cam_trace.h)
+            find drivers/media/platform/msm/camera -name '*_trace.h' -printf '%h\n' 2>/dev/null | sed "s|^|$PWD/|"
           } | sort -u > /tmp/inc_dirs.txt
 
           wc -l /tmp/inc_dirs.txt
-          echo "EXTRA_INC=$(sed 's/^/-I/' /tmp/inc_dirs.txt | tr '\n' ' ')" >> "$GITHUB_ENV"
+          echo "EXTRA_INC=$(sed 's/^/-idirafter /' /tmp/inc_dirs.txt | tr '\n' ' ')" >> "$GITHUB_ENV"
 
       - name: Configure kernel
         working-directory: kernel
