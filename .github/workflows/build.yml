@@ -90,6 +90,56 @@ jobs:
           grep -n 'ksu_handle_stat' fs/stat.c
           grep -n 'ksu_handle_sys_reboot' kernel/reboot.c
 
+      - name: Stub oplus_set_opluschg_pd_sdp (charger driver not usable on this tree)
+        working-directory: kernel
+        run: |
+          python3 - << 'PYEOF'
+          import re, subprocess, sys
+
+          sym = "oplus_set_opluschg_pd_sdp"
+          cands = ["drivers/usb/pd/policy_engine.c"] + subprocess.run(
+              ["bash", "-c", f"grep -rlE '{sym}' include drivers/usb drivers/power --include='*.h' 2>/dev/null"],
+              capture_output=True, text=True).stdout.split()
+
+          pat = re.compile(
+              r'^[ \t]*(?:extern[ \t]+)?((?:void|int|bool|long|unsigned[ \t\w]*|u\d+|s\d+)[ \t]+\**[ \t]*'
+              + sym + r'[ \t]*\([^;{]*\))[ \t]*;', re.M)
+
+          proto = None
+          for f in cands:
+              m = pat.search(open(f).read())
+              if m:
+                  proto = " ".join(m.group(1).split())
+                  print("Found declaration in", f, ":", proto)
+                  break
+
+          if not proto:
+              print("ERROR: could not find a declaration of", sym)
+              subprocess.run(["grep", "-rn", sym, "drivers/usb/pd", "include"])
+              sys.exit(1)
+
+          # Give unnamed parameters a name (C needs one in a function definition)
+          head, params = proto.split("(", 1)
+          params = params.rsplit(")", 1)[0].strip()
+          if params and params != "void":
+              fixed = []
+              for i, p in enumerate(x.strip() for x in params.split(",")):
+                  toks = p.replace("*", " * ").split()
+                  basic = {"bool", "int", "long", "char", "short", "unsigned", "signed", "u8", "u16", "u32", "u64", "s8", "s16", "s32", "s64"}
+                  if len(toks) == 1 or toks[-1] == "*" or (toks[-1] in basic):
+                      p = p + " _a" + str(i)
+                  fixed.append(p)
+              proto = head + "(" + ", ".join(fixed) + ")"
+          print("Stub prototype:", proto)
+
+          body = "{ }" if proto.startswith("void") else "{ return 0; }"
+          with open("drivers/usb/pd/policy_engine.c", "a") as fh:
+              fh.write("\n/* RKSU CI stub: real implementation lives in the OPLUS charger driver */\n")
+              fh.write("__weak " + proto + " " + body + "\n")
+          print("Stub appended.")
+          PYEOF
+          tail -n 4 drivers/usb/pd/policy_engine.c
+
       - name: Compute extra include paths (Clang fix, all MSM dirs)
         working-directory: kernel
         run: |
@@ -131,7 +181,7 @@ jobs:
           scripts/config --enable KSU
 
           # OPLUS core drivers gated off in the defconfig (found via linker diagnostics)
-          for c in OPLUS_SYSTEM_KERNEL OPLUS_COMMON_SOFT OPLUS_FEATURE_PROJECTINFO OPLUS_DEVICE_IFNO OPLUS_FEATURE_OPROJECT OPLUS_FEATURE_QCOM_PMICWD OPLUS_SM8150R_CHARGER OPLUS_FINGERPRINT TOUCHPANEL_OPLUS QPNP_SMB2; do
+          for c in OPLUS_SYSTEM_KERNEL OPLUS_COMMON_SOFT OPLUS_FEATURE_PROJECTINFO OPLUS_DEVICE_IFNO OPLUS_FEATURE_OPROJECT OPLUS_FEATURE_QCOM_PMICWD OPLUS_FINGERPRINT TOUCHPANEL_OPLUS QPNP_SMB2; do
             scripts/config --enable "$c"
           done
 
@@ -146,7 +196,7 @@ jobs:
           fi
 
           echo "OPLUS option status after olddefconfig:"
-          for c in OPLUS_SYSTEM_KERNEL OPLUS_COMMON_SOFT OPLUS_FEATURE_PROJECTINFO OPLUS_DEVICE_IFNO OPLUS_FEATURE_OPROJECT OPLUS_FEATURE_QCOM_PMICWD OPLUS_SM8150R_CHARGER OPLUS_FINGERPRINT TOUCHPANEL_OPLUS QPNP_SMB2; do
+          for c in OPLUS_SYSTEM_KERNEL OPLUS_COMMON_SOFT OPLUS_FEATURE_PROJECTINFO OPLUS_DEVICE_IFNO OPLUS_FEATURE_OPROJECT OPLUS_FEATURE_QCOM_PMICWD OPLUS_FINGERPRINT TOUCHPANEL_OPLUS QPNP_SMB2; do
             grep -E "^(# )?CONFIG_$c[= ]" .config || echo "CONFIG_$c missing from .config (dependency not met?)"
           done
 
