@@ -130,6 +130,11 @@ jobs:
 
           scripts/config --enable KSU
 
+          # Options the linker diagnostics showed as "not set" (OPLUS core drivers)
+          for c in OPLUS_FEATURE_PROJECTINFO OPLUS_DEVICE_IFNO TOUCHPANEL_OPLUS QPNP_SMB2; do
+            scripts/config --enable "$c"
+          done
+
           make ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
@@ -139,6 +144,11 @@ jobs:
             echo "ERROR: CONFIG_KSU=y is not enabled."
             exit 1
           fi
+
+          echo "OPLUS option status after olddefconfig:"
+          for c in OPLUS_FEATURE_PROJECTINFO OPLUS_DEVICE_IFNO TOUCHPANEL_OPLUS QPNP_SMB2; do
+            grep -E "^(# )?CONFIG_$c[= ]" .config || echo "CONFIG_$c missing from .config (dependency not met?)"
+          done
 
           echo "RKSU configuration enabled."
           grep -E '^CONFIG_KSU' .config || true
@@ -163,6 +173,9 @@ jobs:
         if: failure()
         working-directory: kernel
         run: |
+          # Also write diagnostics into build.log so they ship in the uploaded artifact
+          exec > >(tee -a build.log) 2>&1
+
           # For each linker "undefined symbol", find who defines it and which CONFIG gates it
           for sym in $(grep -oP 'undefined symbol: \K\S+' build.log | sort -u); do
             echo "=== $sym"
@@ -172,11 +185,24 @@ jobs:
               echo "defined in: $f"
               d=$(dirname "$f"); o=$(basename "$f" .c)
               grep -hE "$o\.o|$o/" "$d/Makefile" 2>/dev/null | head -2
+              # Walk up: which parent Makefile line pulls in this folder, and is its CONFIG on?
+              p="$d"
+              for i in 1 2 3 4; do
+                b=$(basename "$p"); p=$(dirname "$p")
+                line=$(grep -hE "[ =+]$b/" "$p/Makefile" 2>/dev/null | head -1)
+                if [ -n "$line" ]; then
+                  echo "parent gate ($p/Makefile): $line"
+                  for c in $(echo "$line" | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u); do
+                    grep -E "^(# )?$c[= ]" .config || echo "$c not in .config"
+                  done
+                fi
+              done
               for c in $(grep -hE "$o\.o|$o/" "$d/Makefile" 2>/dev/null | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u); do
                 grep -E "^(# )?$c[= ]" .config || echo "$c not in .config"
               done
             done
           done
+          sleep 2
 
       - name: Summarize all errors
         if: always()
