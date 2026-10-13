@@ -289,6 +289,46 @@ jobs:
           path: kernel/arch/arm64/boot/Image
           if-no-files-found: error
 
+      - name: Package AnyKernel3 zip
+        if: success()
+        run: |
+          set -e
+
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git ak3
+          cd ak3
+          rm -rf .git .github README.md
+
+          cp ../kernel/arch/arm64/boot/Image Image
+
+          sed -i -E 's/^kernel\.string=.*/kernel.string=RKSU OnePlus 7T/' anykernel.sh
+          sed -i -E 's/^do\.devicecheck=.*/do.devicecheck=1/' anykernel.sh
+          sed -i -E 's/^do\.modules=.*/do.modules=0/' anykernel.sh
+          sed -i -E 's/^device\.name1=.*/device.name1=hotdogb/' anykernel.sh
+          sed -i -E 's/^device\.name2=.*/device.name2=OnePlus7T/' anykernel.sh
+          sed -i -E 's/^device\.name3=.*/device.name3=/' anykernel.sh
+          sed -i -E 's/^device\.name4=.*/device.name4=/' anykernel.sh
+          sed -i -E 's/^device\.name5=.*/device.name5=/' anykernel.sh
+          sed -i -E 's|^(block)=.*|\1=/dev/block/bootdevice/by-name/boot;|I' anykernel.sh
+          sed -i -E 's/^(is_slot_device)=.*/\1=auto;/I' anykernel.sh
+
+          grep -q '^device.name1=hotdogb' anykernel.sh
+          grep -qiE '^block=/dev/block/bootdevice/by-name/boot;' anykernel.sh
+          grep -qiE '^is_slot_device=auto;' anykernel.sh
+
+          sed -n '1,50p' anykernel.sh
+
+          zip -r9 "../RKSU-OnePlus7T-AK3-$(date +%Y%m%d).zip" . -x '*.git*'
+          ls -lh ../RKSU-OnePlus7T-AK3-*.zip
+          unzip -l ../RKSU-OnePlus7T-AK3-*.zip
+
+      - name: Upload AnyKernel3 zip
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RKSU-OnePlus7T-AnyKernel3
+          path: RKSU-OnePlus7T-AK3-*.zip
+          if-no-files-found: error
+
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
