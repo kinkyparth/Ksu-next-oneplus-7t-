@@ -90,23 +90,25 @@ jobs:
           grep -n 'ksu_handle_stat' fs/stat.c
           grep -n 'ksu_handle_sys_reboot' kernel/reboot.c
 
-      - name: Fix camera tracepoint include paths (Clang)
+      - name: Compute extra include paths (Clang fix, all MSM dirs)
         working-directory: kernel
         run: |
           set -e
 
-          grep -rl 'CREATE_TRACE_POINTS' \
-            drivers/media/platform/msm/camera --include='*.c' |
-          while read -r f; do
-            dir=$(dirname "$f")
-            obj="$(basename "$f" .c).o"
-            mk="$dir/Makefile"
-            [ -f "$mk" ] || continue
-            if ! grep -q "CFLAGS_$obj" "$mk"; then
-              printf '\nCFLAGS_%s += -I$(src)\n' "$obj" >> "$mk"
-              echo "Patched $mk for $obj"
-            fi
-          done
+          roots="drivers/platform/msm drivers/media/platform/msm drivers/soc/qcom drivers/misc drivers/input drivers/char drivers/power"
+
+          {
+            # Parent dir of every subdir (fixes "subdir/x.h includes ../x.h" cases, e.g. ipa_v3/dump)
+            for d in $(find $roots -mindepth 1 -type d 2>/dev/null); do
+              p=$(dirname "$d")
+              if ls "$p"/*.h >/dev/null 2>&1; then echo "$PWD/$p"; fi
+            done
+            # Dirs holding tracepoint headers (fixes cam_trace.h)
+            find $roots -name '*_trace.h' -printf '%h\n' 2>/dev/null | sed "s|^|$PWD/|"
+          } | sort -u > /tmp/inc_dirs.txt
+
+          wc -l /tmp/inc_dirs.txt
+          echo "EXTRA_INC=$(sed 's/^/-I/' /tmp/inc_dirs.txt | tr '\n' ' ')" >> "$GITHUB_ENV"
 
       - name: Configure kernel
         working-directory: kernel
@@ -145,7 +147,7 @@ jobs:
         run: |
           set -o pipefail
 
-          make -j"$(nproc)" \
+          make -k -j"$(nproc)" \
             ARCH=arm64 \
             CC=clang-14 \
             CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -153,8 +155,14 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             LLVM=1 \
             LLVM_IAS=1 \
-            KCFLAGS="-Wno-error" \
+            KCFLAGS="-Wno-error $EXTRA_INC" \
             Image 2>&1 | tee build.log
+
+      - name: Summarize all errors
+        if: always()
+        working-directory: kernel
+        run: |
+          grep -nE "fatal error|error:|undefined reference" build.log | sort -u | head -80 || true
 
       - name: Verify Image
         if: always()
