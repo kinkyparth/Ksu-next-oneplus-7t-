@@ -130,8 +130,8 @@ jobs:
 
           scripts/config --enable KSU
 
-          # Options the linker diagnostics showed as "not set" (OPLUS core drivers)
-          for c in OPLUS_FEATURE_PROJECTINFO OPLUS_DEVICE_IFNO TOUCHPANEL_OPLUS QPNP_SMB2; do
+          # OPLUS core drivers gated off in the defconfig (found via linker diagnostics)
+          for c in OPLUS_SYSTEM_KERNEL OPLUS_COMMON_SOFT OPLUS_FEATURE_PROJECTINFO OPLUS_DEVICE_IFNO OPLUS_FEATURE_OPROJECT OPLUS_FEATURE_QCOM_PMICWD OPLUS_SM8150R_CHARGER OPLUS_FINGERPRINT TOUCHPANEL_OPLUS QPNP_SMB2; do
             scripts/config --enable "$c"
           done
 
@@ -146,9 +146,17 @@ jobs:
           fi
 
           echo "OPLUS option status after olddefconfig:"
-          for c in OPLUS_FEATURE_PROJECTINFO OPLUS_DEVICE_IFNO TOUCHPANEL_OPLUS QPNP_SMB2; do
+          for c in OPLUS_SYSTEM_KERNEL OPLUS_COMMON_SOFT OPLUS_FEATURE_PROJECTINFO OPLUS_DEVICE_IFNO OPLUS_FEATURE_OPROJECT OPLUS_FEATURE_QCOM_PMICWD OPLUS_SM8150R_CHARGER OPLUS_FINGERPRINT TOUCHPANEL_OPLUS QPNP_SMB2; do
             grep -E "^(# )?CONFIG_$c[= ]" .config || echo "CONFIG_$c missing from .config (dependency not met?)"
           done
+
+          # Any gate that is not a real Kconfig symbol gets passed to make directly
+          extra=""
+          for c in OPLUS_FEATURE_QCOM_PMICWD; do
+            grep -qx "CONFIG_$c=y" .config || extra="$extra CONFIG_$c=y"
+          done
+          echo "EXTRA_MAKE_VARS=$extra" >> "$GITHUB_ENV"
+          echo "Extra make vars:$extra"
 
           echo "RKSU configuration enabled."
           grep -E '^CONFIG_KSU' .config || true
@@ -167,6 +175,7 @@ jobs:
             LLVM=1 \
             LLVM_IAS=1 \
             KCFLAGS="-Wno-error $EXTRA_INC" \
+            $EXTRA_MAKE_VARS \
             Image 2>&1 | tee build.log
 
       - name: Diagnose missing symbols
