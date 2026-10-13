@@ -1,4 +1,3 @@
-
 name: RKSU Kernel Build - OnePlus 7T
 
 on:
@@ -90,6 +89,24 @@ jobs:
           grep -n 'ksu_handle_vfs_read' fs/read_write.c
           grep -n 'ksu_handle_stat' fs/stat.c
           grep -n 'ksu_handle_sys_reboot' kernel/reboot.c
+
+      - name: Fix camera tracepoint include paths (Clang)
+        working-directory: kernel
+        run: |
+          set -e
+
+          grep -rl 'CREATE_TRACE_POINTS' \
+            drivers/media/platform/msm/camera --include='*.c' |
+          while read -r f; do
+            dir=$(dirname "$f")
+            obj="$(basename "$f" .c).o"
+            mk="$dir/Makefile"
+            [ -f "$mk" ] || continue
+            if ! grep -q "CFLAGS_$obj" "$mk"; then
+              printf '\nCFLAGS_%s += -I$(src)\n' "$obj" >> "$mk"
+              echo "Patched $mk for $obj"
+            fi
+          done
 
       - name: Configure kernel
         working-directory: kernel
