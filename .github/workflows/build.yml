@@ -159,6 +159,25 @@ jobs:
             KCFLAGS="-Wno-error $EXTRA_INC" \
             Image 2>&1 | tee build.log
 
+      - name: Diagnose missing symbols
+        if: failure()
+        working-directory: kernel
+        run: |
+          # For each linker "undefined symbol", find who defines it and which CONFIG gates it
+          for sym in $(grep -oP 'undefined symbol: \K\S+' build.log | sort -u); do
+            echo "=== $sym"
+            grep -rlE "EXPORT_SYMBOL(_GPL)?\($sym\)|^[A-Za-z_][A-Za-z0-9_ \*]*[ \*]$sym\(" \
+              --include='*.c' drivers kernel techpack arch fs 2>/dev/null | head -2 |
+            while read -r f; do
+              echo "defined in: $f"
+              d=$(dirname "$f"); o=$(basename "$f" .c)
+              grep -hE "$o\.o|$o/" "$d/Makefile" 2>/dev/null | head -2
+              for c in $(grep -hE "$o\.o|$o/" "$d/Makefile" 2>/dev/null | grep -oE 'CONFIG_[A-Z0-9_]+' | sort -u); do
+                grep -E "^(# )?$c[= ]" .config || echo "$c not in .config"
+              done
+            done
+          done
+
       - name: Summarize all errors
         if: always()
         working-directory: kernel
